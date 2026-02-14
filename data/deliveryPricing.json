@@ -1,0 +1,3267 @@
+{
+  "defaultFee": 5000,
+  "updatedAt": "2026-02-07T02:05:11.461Z",
+  "states": [
+    {
+      "name": "Abia",
+      "cities": [
+        {
+          "name": "Aba North",
+          "fee": 5000
+        },
+        {
+          "name": "Aba South",
+          "fee": 5000
+        },
+        {
+          "name": "Arochukwu",
+          "fee": 5000
+        },
+        {
+          "name": "Bende",
+          "fee": 5000
+        },
+        {
+          "name": "Ikwuano",
+          "fee": 5000
+        },
+        {
+          "name": "Isiala-Ngwa North",
+          "fee": 5000
+        },
+        {
+          "name": "Isiala-Ngwa South",
+          "fee": 5000
+        },
+        {
+          "name": "Isuikwato",
+          "fee": 5000
+        },
+        {
+          "name": "Ngwa",
+          "fee": 5000
+        },
+        {
+          "name": "Obi Nwa",
+          "fee": 5000
+        },
+        {
+          "name": "Ohafia",
+          "fee": 5000
+        },
+        {
+          "name": "Osisioma",
+          "fee": 5000
+        },
+        {
+          "name": "Ugwunagbo",
+          "fee": 5000
+        },
+        {
+          "name": "Ukwa East",
+          "fee": 5000
+        },
+        {
+          "name": "Ukwa West",
+          "fee": 5000
+        },
+        {
+          "name": "Umu-Neochi",
+          "fee": 5000
+        },
+        {
+          "name": "Umuahia North",
+          "fee": 5000
+        },
+        {
+          "name": "Umuahia South",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Adamawa",
+      "cities": [
+        {
+          "name": "Demsa",
+          "fee": 5000
+        },
+        {
+          "name": "Fufore",
+          "fee": 5000
+        },
+        {
+          "name": "Ganaye",
+          "fee": 5000
+        },
+        {
+          "name": "Gireri",
+          "fee": 5000
+        },
+        {
+          "name": "Gombi",
+          "fee": 5000
+        },
+        {
+          "name": "Guyuk",
+          "fee": 5000
+        },
+        {
+          "name": "Hong",
+          "fee": 5000
+        },
+        {
+          "name": "Jada",
+          "fee": 5000
+        },
+        {
+          "name": "Lamurde",
+          "fee": 5000
+        },
+        {
+          "name": "Madagali",
+          "fee": 5000
+        },
+        {
+          "name": "Maiha",
+          "fee": 5000
+        },
+        {
+          "name": "Mayo-Belwa",
+          "fee": 5000
+        },
+        {
+          "name": "Michika",
+          "fee": 5000
+        },
+        {
+          "name": "Mubi North",
+          "fee": 5000
+        },
+        {
+          "name": "Mubi South",
+          "fee": 5000
+        },
+        {
+          "name": "Numan",
+          "fee": 5000
+        },
+        {
+          "name": "Shelleng",
+          "fee": 5000
+        },
+        {
+          "name": "Song",
+          "fee": 5000
+        },
+        {
+          "name": "Toungo",
+          "fee": 5000
+        },
+        {
+          "name": "Yola North",
+          "fee": 5000
+        },
+        {
+          "name": "Yola South",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Akwa Ibom",
+      "cities": [
+        {
+          "name": "Abak",
+          "fee": 5000
+        },
+        {
+          "name": "Eastern Obolo",
+          "fee": 5000
+        },
+        {
+          "name": "Eket",
+          "fee": 5000
+        },
+        {
+          "name": "Esit Eket",
+          "fee": 5000
+        },
+        {
+          "name": "Essien Udim",
+          "fee": 5000
+        },
+        {
+          "name": "Etim Ekpo",
+          "fee": 5000
+        },
+        {
+          "name": "Etinan",
+          "fee": 5000
+        },
+        {
+          "name": "Ibeno",
+          "fee": 5000
+        },
+        {
+          "name": "Ibesikpo Asutan",
+          "fee": 5000
+        },
+        {
+          "name": "Ibiono Ibom",
+          "fee": 5000
+        },
+        {
+          "name": "Ika",
+          "fee": 5000
+        },
+        {
+          "name": "Ikono",
+          "fee": 5000
+        },
+        {
+          "name": "Ikot Abasi",
+          "fee": 5000
+        },
+        {
+          "name": "Ikot Ekpene",
+          "fee": 5000
+        },
+        {
+          "name": "Ini",
+          "fee": 5000
+        },
+        {
+          "name": "Itu",
+          "fee": 5000
+        },
+        {
+          "name": "Mbo",
+          "fee": 5000
+        },
+        {
+          "name": "Mkpat Enin",
+          "fee": 5000
+        },
+        {
+          "name": "Nsit Atai",
+          "fee": 5000
+        },
+        {
+          "name": "Nsit Ibom",
+          "fee": 5000
+        },
+        {
+          "name": "Nsit Ubium",
+          "fee": 5000
+        },
+        {
+          "name": "Obot Akara",
+          "fee": 5000
+        },
+        {
+          "name": "Okobo",
+          "fee": 5000
+        },
+        {
+          "name": "Onna",
+          "fee": 5000
+        },
+        {
+          "name": "Oron",
+          "fee": 5000
+        },
+        {
+          "name": "Oruk Anam",
+          "fee": 5000
+        },
+        {
+          "name": "Udung Uko",
+          "fee": 5000
+        },
+        {
+          "name": "Ukanafun",
+          "fee": 5000
+        },
+        {
+          "name": "Uruan",
+          "fee": 5000
+        },
+        {
+          "name": "Urue-Offong/Oruko",
+          "fee": 5000
+        },
+        {
+          "name": "Uyo",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Anambra",
+      "cities": [
+        {
+          "name": "Aguata",
+          "fee": 5000
+        },
+        {
+          "name": "Anambra East",
+          "fee": 5000
+        },
+        {
+          "name": "Anambra West",
+          "fee": 5000
+        },
+        {
+          "name": "Anaocha",
+          "fee": 5000
+        },
+        {
+          "name": "Awka North",
+          "fee": 5000
+        },
+        {
+          "name": "Awka South",
+          "fee": 5000
+        },
+        {
+          "name": "Ayamelum",
+          "fee": 5000
+        },
+        {
+          "name": "Dunukofia",
+          "fee": 5000
+        },
+        {
+          "name": "Ekwusigo",
+          "fee": 5000
+        },
+        {
+          "name": "Idemili North",
+          "fee": 5000
+        },
+        {
+          "name": "Idemili south",
+          "fee": 5000
+        },
+        {
+          "name": "Ihiala",
+          "fee": 5000
+        },
+        {
+          "name": "Njikoka",
+          "fee": 5000
+        },
+        {
+          "name": "Nnewi North",
+          "fee": 5000
+        },
+        {
+          "name": "Nnewi South",
+          "fee": 5000
+        },
+        {
+          "name": "Ogbaru",
+          "fee": 5000
+        },
+        {
+          "name": "Onitsha North",
+          "fee": 5000
+        },
+        {
+          "name": "Onitsha South",
+          "fee": 5000
+        },
+        {
+          "name": "Orumba North",
+          "fee": 5000
+        },
+        {
+          "name": "Orumba South",
+          "fee": 5000
+        },
+        {
+          "name": "Oyi",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Bauchi",
+      "cities": [
+        {
+          "name": "Alkaleri",
+          "fee": 5000
+        },
+        {
+          "name": "Bauchi",
+          "fee": 5000
+        },
+        {
+          "name": "Bogoro",
+          "fee": 5000
+        },
+        {
+          "name": "Damban",
+          "fee": 5000
+        },
+        {
+          "name": "Darazo",
+          "fee": 5000
+        },
+        {
+          "name": "Dass",
+          "fee": 5000
+        },
+        {
+          "name": "Ganjuwa",
+          "fee": 5000
+        },
+        {
+          "name": "Giade",
+          "fee": 5000
+        },
+        {
+          "name": "Itas/Gadau",
+          "fee": 5000
+        },
+        {
+          "name": "Jama'are",
+          "fee": 5000
+        },
+        {
+          "name": "Katagum",
+          "fee": 5000
+        },
+        {
+          "name": "Kirfi",
+          "fee": 5000
+        },
+        {
+          "name": "Misau",
+          "fee": 5000
+        },
+        {
+          "name": "Ningi",
+          "fee": 5000
+        },
+        {
+          "name": "Shira",
+          "fee": 5000
+        },
+        {
+          "name": "Tafawa-Balewa",
+          "fee": 5000
+        },
+        {
+          "name": "Toro",
+          "fee": 5000
+        },
+        {
+          "name": "Warji",
+          "fee": 5000
+        },
+        {
+          "name": "Zaki",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Bayelsa",
+      "cities": [
+        {
+          "name": "Brass",
+          "fee": 5000
+        },
+        {
+          "name": "Ekeremor",
+          "fee": 5000
+        },
+        {
+          "name": "Kolokuma/Opokuma",
+          "fee": 5000
+        },
+        {
+          "name": "Nembe",
+          "fee": 5000
+        },
+        {
+          "name": "Ogbia",
+          "fee": 5000
+        },
+        {
+          "name": "Sagbama",
+          "fee": 5000
+        },
+        {
+          "name": "Southern Jaw",
+          "fee": 5000
+        },
+        {
+          "name": "Yenegoa",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Benue",
+      "cities": [
+        {
+          "name": "Ado",
+          "fee": 5000
+        },
+        {
+          "name": "Agatu",
+          "fee": 5000
+        },
+        {
+          "name": "Apa",
+          "fee": 5000
+        },
+        {
+          "name": "Buruku",
+          "fee": 5000
+        },
+        {
+          "name": "Gboko",
+          "fee": 5000
+        },
+        {
+          "name": "Guma",
+          "fee": 5000
+        },
+        {
+          "name": "Gwer East",
+          "fee": 5000
+        },
+        {
+          "name": "Gwer West",
+          "fee": 5000
+        },
+        {
+          "name": "Katsina-Ala",
+          "fee": 5000
+        },
+        {
+          "name": "Konshisha",
+          "fee": 5000
+        },
+        {
+          "name": "Kwande",
+          "fee": 5000
+        },
+        {
+          "name": "Logo",
+          "fee": 5000
+        },
+        {
+          "name": "Makurdi",
+          "fee": 5000
+        },
+        {
+          "name": "Obi",
+          "fee": 5000
+        },
+        {
+          "name": "Ogbadibo",
+          "fee": 5000
+        },
+        {
+          "name": "Ohimini",
+          "fee": 5000
+        },
+        {
+          "name": "Oju",
+          "fee": 5000
+        },
+        {
+          "name": "Okpokwu",
+          "fee": 5000
+        },
+        {
+          "name": "Oturkpo",
+          "fee": 5000
+        },
+        {
+          "name": "Tarka",
+          "fee": 5000
+        },
+        {
+          "name": "Ukum",
+          "fee": 5000
+        },
+        {
+          "name": "Ushongo",
+          "fee": 5000
+        },
+        {
+          "name": "Vandeikya",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Borno",
+      "cities": [
+        {
+          "name": "Abadam",
+          "fee": 5000
+        },
+        {
+          "name": "Askira/Uba",
+          "fee": 5000
+        },
+        {
+          "name": "Bama",
+          "fee": 5000
+        },
+        {
+          "name": "Bayo",
+          "fee": 5000
+        },
+        {
+          "name": "Biu",
+          "fee": 5000
+        },
+        {
+          "name": "Chibok",
+          "fee": 5000
+        },
+        {
+          "name": "Damboa",
+          "fee": 5000
+        },
+        {
+          "name": "Dikwa",
+          "fee": 5000
+        },
+        {
+          "name": "Gubio",
+          "fee": 5000
+        },
+        {
+          "name": "Guzamala",
+          "fee": 5000
+        },
+        {
+          "name": "Gwoza",
+          "fee": 5000
+        },
+        {
+          "name": "Hawul",
+          "fee": 5000
+        },
+        {
+          "name": "Jere",
+          "fee": 5000
+        },
+        {
+          "name": "Kaga",
+          "fee": 5000
+        },
+        {
+          "name": "Kala/Balge",
+          "fee": 5000
+        },
+        {
+          "name": "Konduga",
+          "fee": 5000
+        },
+        {
+          "name": "Kukawa",
+          "fee": 5000
+        },
+        {
+          "name": "Kwaya Kusar",
+          "fee": 5000
+        },
+        {
+          "name": "Mafa",
+          "fee": 5000
+        },
+        {
+          "name": "Magumeri",
+          "fee": 5000
+        },
+        {
+          "name": "Maiduguri",
+          "fee": 5000
+        },
+        {
+          "name": "Marte",
+          "fee": 5000
+        },
+        {
+          "name": "Mobbar",
+          "fee": 5000
+        },
+        {
+          "name": "Monguno",
+          "fee": 5000
+        },
+        {
+          "name": "Ngala",
+          "fee": 5000
+        },
+        {
+          "name": "Nganzai",
+          "fee": 5000
+        },
+        {
+          "name": "Shani",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Cross River",
+      "cities": [
+        {
+          "name": "Abi",
+          "fee": 5000
+        },
+        {
+          "name": "Akamkpa",
+          "fee": 5000
+        },
+        {
+          "name": "Akpabuyo",
+          "fee": 5000
+        },
+        {
+          "name": "Bakassi",
+          "fee": 5000
+        },
+        {
+          "name": "Bekwara",
+          "fee": 5000
+        },
+        {
+          "name": "Biase",
+          "fee": 5000
+        },
+        {
+          "name": "Boki",
+          "fee": 5000
+        },
+        {
+          "name": "Calabar Municipality",
+          "fee": 5000
+        },
+        {
+          "name": "Calabar South",
+          "fee": 5000
+        },
+        {
+          "name": "Etung",
+          "fee": 5000
+        },
+        {
+          "name": "Ikom",
+          "fee": 5000
+        },
+        {
+          "name": "Obanliku",
+          "fee": 5000
+        },
+        {
+          "name": "Obudu",
+          "fee": 5000
+        },
+        {
+          "name": "Odubra",
+          "fee": 5000
+        },
+        {
+          "name": "Odukpani",
+          "fee": 5000
+        },
+        {
+          "name": "Ogoja",
+          "fee": 5000
+        },
+        {
+          "name": "Yala",
+          "fee": 5000
+        },
+        {
+          "name": "Yarkur",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Delta",
+      "cities": [
+        {
+          "name": "Aniocha",
+          "fee": 5000
+        },
+        {
+          "name": "Aniocha South",
+          "fee": 5000
+        },
+        {
+          "name": "Bomadi",
+          "fee": 5000
+        },
+        {
+          "name": "Burutu",
+          "fee": 5000
+        },
+        {
+          "name": "Ethiope East",
+          "fee": 5000
+        },
+        {
+          "name": "Ethiope West",
+          "fee": 5000
+        },
+        {
+          "name": "Ika North-East",
+          "fee": 5000
+        },
+        {
+          "name": "Ika South",
+          "fee": 5000
+        },
+        {
+          "name": "Isoko North",
+          "fee": 5000
+        },
+        {
+          "name": "Isoko south",
+          "fee": 5000
+        },
+        {
+          "name": "Ndokwa East",
+          "fee": 5000
+        },
+        {
+          "name": "Ndokwa West",
+          "fee": 5000
+        },
+        {
+          "name": "Okpe",
+          "fee": 5000
+        },
+        {
+          "name": "Oshimili",
+          "fee": 5000
+        },
+        {
+          "name": "Oshimili North",
+          "fee": 5000
+        },
+        {
+          "name": "Patani",
+          "fee": 5000
+        },
+        {
+          "name": "Sapele",
+          "fee": 5000
+        },
+        {
+          "name": "Udu",
+          "fee": 5000
+        },
+        {
+          "name": "Ughelli North",
+          "fee": 5000
+        },
+        {
+          "name": "Ughelli South",
+          "fee": 5000
+        },
+        {
+          "name": "Ukwani",
+          "fee": 5000
+        },
+        {
+          "name": "Uvwie",
+          "fee": 5000
+        },
+        {
+          "name": "Warri Central",
+          "fee": 5000
+        },
+        {
+          "name": "Warri North",
+          "fee": 5000
+        },
+        {
+          "name": "Warri South",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Ebonyi",
+      "cities": [
+        {
+          "name": "Abakaliki",
+          "fee": 5000
+        },
+        {
+          "name": "Afikpo",
+          "fee": 5000
+        },
+        {
+          "name": "Ebonyi",
+          "fee": 5000
+        },
+        {
+          "name": "Edda",
+          "fee": 5000
+        },
+        {
+          "name": "Ezza",
+          "fee": 5000
+        },
+        {
+          "name": "Ezza South",
+          "fee": 5000
+        },
+        {
+          "name": "Ishielu",
+          "fee": 5000
+        },
+        {
+          "name": "Ivo",
+          "fee": 5000
+        },
+        {
+          "name": "lkwo",
+          "fee": 5000
+        },
+        {
+          "name": "Ohaozara",
+          "fee": 5000
+        },
+        {
+          "name": "Ohaukwu",
+          "fee": 5000
+        },
+        {
+          "name": "Onicha",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Edo",
+      "cities": [
+        {
+          "name": "Central",
+          "fee": 5000
+        },
+        {
+          "name": "Egor",
+          "fee": 5000
+        },
+        {
+          "name": "Esan Central",
+          "fee": 5000
+        },
+        {
+          "name": "Esan North-East",
+          "fee": 5000
+        },
+        {
+          "name": "Esan South-East",
+          "fee": 5000
+        },
+        {
+          "name": "Esan West",
+          "fee": 5000
+        },
+        {
+          "name": "Etsako Central",
+          "fee": 5000
+        },
+        {
+          "name": "Etsako East",
+          "fee": 5000
+        },
+        {
+          "name": "Igueben",
+          "fee": 5000
+        },
+        {
+          "name": "Oredo",
+          "fee": 5000
+        },
+        {
+          "name": "Orhionwon",
+          "fee": 5000
+        },
+        {
+          "name": "Ovia South-East",
+          "fee": 5000
+        },
+        {
+          "name": "Ovia SouthWest",
+          "fee": 5000
+        },
+        {
+          "name": "Uhunmwonde",
+          "fee": 5000
+        },
+        {
+          "name": "Ukpoba",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Ekiti",
+      "cities": [
+        {
+          "name": "Ado",
+          "fee": 5000
+        },
+        {
+          "name": "Efon",
+          "fee": 5000
+        },
+        {
+          "name": "Ekiti South-West",
+          "fee": 5000
+        },
+        {
+          "name": "Ekiti-East",
+          "fee": 5000
+        },
+        {
+          "name": "Ekiti-West",
+          "fee": 5000
+        },
+        {
+          "name": "Emure/Ise/Orun",
+          "fee": 5000
+        },
+        {
+          "name": "Gbonyin",
+          "fee": 5000
+        },
+        {
+          "name": "Ido/Osi",
+          "fee": 5000
+        },
+        {
+          "name": "Ijero,",
+          "fee": 5000
+        },
+        {
+          "name": "Ikere",
+          "fee": 5000
+        },
+        {
+          "name": "Ikole",
+          "fee": 5000
+        },
+        {
+          "name": "Ilejemeje.",
+          "fee": 5000
+        },
+        {
+          "name": "Irepodun",
+          "fee": 5000
+        },
+        {
+          "name": "Ise/Orun",
+          "fee": 5000
+        },
+        {
+          "name": "Moba",
+          "fee": 5000
+        },
+        {
+          "name": "Oye",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Enugu",
+      "cities": [
+        {
+          "name": "Aninri",
+          "fee": 5000
+        },
+        {
+          "name": "Enugu Eas",
+          "fee": 5000
+        },
+        {
+          "name": "Enugu North",
+          "fee": 5000
+        },
+        {
+          "name": "Enugu South,",
+          "fee": 5000
+        },
+        {
+          "name": "Ezeagu",
+          "fee": 5000
+        },
+        {
+          "name": "Igbo-Ekiti",
+          "fee": 5000
+        },
+        {
+          "name": "Igbo-Eze South",
+          "fee": 5000
+        },
+        {
+          "name": "IgboEze North",
+          "fee": 5000
+        },
+        {
+          "name": "Isi-Uzo",
+          "fee": 5000
+        },
+        {
+          "name": "Nkanu",
+          "fee": 5000
+        },
+        {
+          "name": "Nkanu East",
+          "fee": 5000
+        },
+        {
+          "name": "Nsukka",
+          "fee": 5000
+        },
+        {
+          "name": "Oji-River",
+          "fee": 5000
+        },
+        {
+          "name": "Udenu.",
+          "fee": 5000
+        },
+        {
+          "name": "Udi Agwu",
+          "fee": 5000
+        },
+        {
+          "name": "Uzo-Uwani",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "FCT",
+      "cities": [
+        {
+          "name": "Abaji",
+          "fee": 5000
+        },
+        {
+          "name": "Abuja Municipal",
+          "fee": 5000
+        },
+        {
+          "name": "Bwari",
+          "fee": 5000
+        },
+        {
+          "name": "Gwagwalada",
+          "fee": 5000
+        },
+        {
+          "name": "Kuje",
+          "fee": 5000
+        },
+        {
+          "name": "Kwali",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Gombe",
+      "cities": [
+        {
+          "name": "Akko",
+          "fee": 5000
+        },
+        {
+          "name": "Balanga",
+          "fee": 5000
+        },
+        {
+          "name": "Billiri",
+          "fee": 5000
+        },
+        {
+          "name": "Dukku",
+          "fee": 5000
+        },
+        {
+          "name": "Funakaye",
+          "fee": 5000
+        },
+        {
+          "name": "Gombe",
+          "fee": 5000
+        },
+        {
+          "name": "Kaltungo",
+          "fee": 5000
+        },
+        {
+          "name": "Kwami",
+          "fee": 5000
+        },
+        {
+          "name": "Nafada/Bajoga",
+          "fee": 5000
+        },
+        {
+          "name": "Shomgom",
+          "fee": 5000
+        },
+        {
+          "name": "Yamaltu/Delta.",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Imo",
+      "cities": [
+        {
+          "name": "Aboh-Mbaise",
+          "fee": 5000
+        },
+        {
+          "name": "Ahiazu-Mbaise",
+          "fee": 5000
+        },
+        {
+          "name": "Ehime-Mbano",
+          "fee": 5000
+        },
+        {
+          "name": "Ezinihitte",
+          "fee": 5000
+        },
+        {
+          "name": "Ideato North",
+          "fee": 5000
+        },
+        {
+          "name": "Ideato South",
+          "fee": 5000
+        },
+        {
+          "name": "Ihitte/Uboma",
+          "fee": 5000
+        },
+        {
+          "name": "Ikeduru",
+          "fee": 5000
+        },
+        {
+          "name": "Isiala Mbano",
+          "fee": 5000
+        },
+        {
+          "name": "Isu",
+          "fee": 5000
+        },
+        {
+          "name": "Mbaitoli",
+          "fee": 5000
+        },
+        {
+          "name": "Mbaitoli",
+          "fee": 5000
+        },
+        {
+          "name": "Ngor-Okpala",
+          "fee": 5000
+        },
+        {
+          "name": "Njaba",
+          "fee": 5000
+        },
+        {
+          "name": "Nkwerre",
+          "fee": 5000
+        },
+        {
+          "name": "Nwangele",
+          "fee": 5000
+        },
+        {
+          "name": "Obowo",
+          "fee": 5000
+        },
+        {
+          "name": "Oguta",
+          "fee": 5000
+        },
+        {
+          "name": "Ohaji/Egbema",
+          "fee": 5000
+        },
+        {
+          "name": "Okigwe",
+          "fee": 5000
+        },
+        {
+          "name": "Orlu",
+          "fee": 5000
+        },
+        {
+          "name": "Orsu",
+          "fee": 5000
+        },
+        {
+          "name": "Oru East",
+          "fee": 5000
+        },
+        {
+          "name": "Oru West",
+          "fee": 5000
+        },
+        {
+          "name": "Owerri North",
+          "fee": 5000
+        },
+        {
+          "name": "Owerri West",
+          "fee": 5000
+        },
+        {
+          "name": "Owerri-Municipal",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Jigawa",
+      "cities": [
+        {
+          "name": "Auyo",
+          "fee": 5000
+        },
+        {
+          "name": "Babura",
+          "fee": 5000
+        },
+        {
+          "name": "Biriniwa",
+          "fee": 5000
+        },
+        {
+          "name": "Birni Kudu",
+          "fee": 5000
+        },
+        {
+          "name": "Buji",
+          "fee": 5000
+        },
+        {
+          "name": "Dutse",
+          "fee": 5000
+        },
+        {
+          "name": "Gagarawa",
+          "fee": 5000
+        },
+        {
+          "name": "Garki",
+          "fee": 5000
+        },
+        {
+          "name": "Gumel",
+          "fee": 5000
+        },
+        {
+          "name": "Guri",
+          "fee": 5000
+        },
+        {
+          "name": "Gwaram",
+          "fee": 5000
+        },
+        {
+          "name": "Gwiwa",
+          "fee": 5000
+        },
+        {
+          "name": "Hadejia",
+          "fee": 5000
+        },
+        {
+          "name": "Jahun",
+          "fee": 5000
+        },
+        {
+          "name": "Kafin Hausa",
+          "fee": 5000
+        },
+        {
+          "name": "Kaugama Kazaure",
+          "fee": 5000
+        },
+        {
+          "name": "Kiri Kasamma",
+          "fee": 5000
+        },
+        {
+          "name": "Kiyawa",
+          "fee": 5000
+        },
+        {
+          "name": "Maigatari",
+          "fee": 5000
+        },
+        {
+          "name": "Malam Madori",
+          "fee": 5000
+        },
+        {
+          "name": "Miga",
+          "fee": 5000
+        },
+        {
+          "name": "Ringim",
+          "fee": 5000
+        },
+        {
+          "name": "Roni",
+          "fee": 5000
+        },
+        {
+          "name": "Sule-Tankarkar",
+          "fee": 5000
+        },
+        {
+          "name": "Taura",
+          "fee": 5000
+        },
+        {
+          "name": "Yankwashi",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Kaduna",
+      "cities": [
+        {
+          "name": "Birni-Gwari",
+          "fee": 5000
+        },
+        {
+          "name": "Chikun",
+          "fee": 5000
+        },
+        {
+          "name": "Giwa",
+          "fee": 5000
+        },
+        {
+          "name": "Igabi",
+          "fee": 5000
+        },
+        {
+          "name": "Ikara",
+          "fee": 5000
+        },
+        {
+          "name": "jaba",
+          "fee": 5000
+        },
+        {
+          "name": "Jema'a",
+          "fee": 5000
+        },
+        {
+          "name": "Kachia",
+          "fee": 5000
+        },
+        {
+          "name": "Kaduna North",
+          "fee": 5000
+        },
+        {
+          "name": "Kaduna South",
+          "fee": 5000
+        },
+        {
+          "name": "Kagarko",
+          "fee": 5000
+        },
+        {
+          "name": "Kajuru",
+          "fee": 5000
+        },
+        {
+          "name": "Kaura",
+          "fee": 5000
+        },
+        {
+          "name": "Kauru",
+          "fee": 5000
+        },
+        {
+          "name": "Kubau",
+          "fee": 5000
+        },
+        {
+          "name": "Kudan",
+          "fee": 5000
+        },
+        {
+          "name": "Lere",
+          "fee": 5000
+        },
+        {
+          "name": "Makarfi",
+          "fee": 5000
+        },
+        {
+          "name": "Sabon-Gari",
+          "fee": 5000
+        },
+        {
+          "name": "Sanga",
+          "fee": 5000
+        },
+        {
+          "name": "Soba",
+          "fee": 5000
+        },
+        {
+          "name": "Zango-Kataf",
+          "fee": 5000
+        },
+        {
+          "name": "Zaria",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Kano",
+      "cities": [
+        {
+          "name": "Ajingi",
+          "fee": 5000
+        },
+        {
+          "name": "Albasu",
+          "fee": 5000
+        },
+        {
+          "name": "Bagwai",
+          "fee": 5000
+        },
+        {
+          "name": "Bebeji",
+          "fee": 5000
+        },
+        {
+          "name": "Bichi",
+          "fee": 5000
+        },
+        {
+          "name": "Bunkure",
+          "fee": 5000
+        },
+        {
+          "name": "Dala",
+          "fee": 5000
+        },
+        {
+          "name": "Dambatta",
+          "fee": 5000
+        },
+        {
+          "name": "Dawakin Kudu",
+          "fee": 5000
+        },
+        {
+          "name": "Dawakin Tofa",
+          "fee": 5000
+        },
+        {
+          "name": "Doguwa",
+          "fee": 5000
+        },
+        {
+          "name": "Fagge",
+          "fee": 5000
+        },
+        {
+          "name": "Gabasawa",
+          "fee": 5000
+        },
+        {
+          "name": "Garko",
+          "fee": 5000
+        },
+        {
+          "name": "Garum",
+          "fee": 5000
+        },
+        {
+          "name": "Gaya",
+          "fee": 5000
+        },
+        {
+          "name": "Gezawa",
+          "fee": 5000
+        },
+        {
+          "name": "Ghari",
+          "fee": 5000
+        },
+        {
+          "name": "Gwale",
+          "fee": 5000
+        },
+        {
+          "name": "Gwarzo",
+          "fee": 5000
+        },
+        {
+          "name": "Kabo",
+          "fee": 5000
+        },
+        {
+          "name": "Kano Municipal",
+          "fee": 5000
+        },
+        {
+          "name": "Karaye",
+          "fee": 5000
+        },
+        {
+          "name": "Kibiya",
+          "fee": 5000
+        },
+        {
+          "name": "Kiru",
+          "fee": 5000
+        },
+        {
+          "name": "kumbotso",
+          "fee": 5000
+        },
+        {
+          "name": "Kura",
+          "fee": 5000
+        },
+        {
+          "name": "Madobi",
+          "fee": 5000
+        },
+        {
+          "name": "Makoda",
+          "fee": 5000
+        },
+        {
+          "name": "Mallam",
+          "fee": 5000
+        },
+        {
+          "name": "Minjibir",
+          "fee": 5000
+        },
+        {
+          "name": "Nasarawa",
+          "fee": 5000
+        },
+        {
+          "name": "Rano",
+          "fee": 5000
+        },
+        {
+          "name": "Rimin Gado",
+          "fee": 5000
+        },
+        {
+          "name": "Rogo",
+          "fee": 5000
+        },
+        {
+          "name": "Shanono",
+          "fee": 5000
+        },
+        {
+          "name": "Sumaila",
+          "fee": 5000
+        },
+        {
+          "name": "Takali",
+          "fee": 5000
+        },
+        {
+          "name": "Tarauni",
+          "fee": 5000
+        },
+        {
+          "name": "Tofa",
+          "fee": 5000
+        },
+        {
+          "name": "Tsanyawa",
+          "fee": 5000
+        },
+        {
+          "name": "Tudun Wada",
+          "fee": 5000
+        },
+        {
+          "name": "Ungogo",
+          "fee": 5000
+        },
+        {
+          "name": "Warawa",
+          "fee": 5000
+        },
+        {
+          "name": "Wudil",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Katsina",
+      "cities": [
+        {
+          "name": "Bakori",
+          "fee": 5000
+        },
+        {
+          "name": "Batagarawa",
+          "fee": 5000
+        },
+        {
+          "name": "Batsari",
+          "fee": 5000
+        },
+        {
+          "name": "Baure",
+          "fee": 5000
+        },
+        {
+          "name": "Bindawa",
+          "fee": 5000
+        },
+        {
+          "name": "Charanchi",
+          "fee": 5000
+        },
+        {
+          "name": "Dan Musa",
+          "fee": 5000
+        },
+        {
+          "name": "Dandume",
+          "fee": 5000
+        },
+        {
+          "name": "Danja",
+          "fee": 5000
+        },
+        {
+          "name": "Daura",
+          "fee": 5000
+        },
+        {
+          "name": "Dutsi",
+          "fee": 5000
+        },
+        {
+          "name": "Dutsin-Ma",
+          "fee": 5000
+        },
+        {
+          "name": "Faskari",
+          "fee": 5000
+        },
+        {
+          "name": "Funtua",
+          "fee": 5000
+        },
+        {
+          "name": "Ingawa",
+          "fee": 5000
+        },
+        {
+          "name": "Jibia",
+          "fee": 5000
+        },
+        {
+          "name": "Kafur",
+          "fee": 5000
+        },
+        {
+          "name": "Kaita",
+          "fee": 5000
+        },
+        {
+          "name": "Kankara",
+          "fee": 5000
+        },
+        {
+          "name": "Kankia",
+          "fee": 5000
+        },
+        {
+          "name": "Katsina",
+          "fee": 5000
+        },
+        {
+          "name": "Kurfi",
+          "fee": 5000
+        },
+        {
+          "name": "Kusada",
+          "fee": 5000
+        },
+        {
+          "name": "Mai'Adua",
+          "fee": 5000
+        },
+        {
+          "name": "Malumfashi",
+          "fee": 5000
+        },
+        {
+          "name": "Mani",
+          "fee": 5000
+        },
+        {
+          "name": "Mashi",
+          "fee": 5000
+        },
+        {
+          "name": "Matazuu",
+          "fee": 5000
+        },
+        {
+          "name": "Musawa",
+          "fee": 5000
+        },
+        {
+          "name": "Rimi",
+          "fee": 5000
+        },
+        {
+          "name": "Sabuwa",
+          "fee": 5000
+        },
+        {
+          "name": "Safana",
+          "fee": 5000
+        },
+        {
+          "name": "Sandamu",
+          "fee": 5000
+        },
+        {
+          "name": "Zango",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Kebbi",
+      "cities": [
+        {
+          "name": "Aleiro",
+          "fee": 5000
+        },
+        {
+          "name": "Arewa-Dandi",
+          "fee": 5000
+        },
+        {
+          "name": "Argungu",
+          "fee": 5000
+        },
+        {
+          "name": "Augie",
+          "fee": 5000
+        },
+        {
+          "name": "Bagudo",
+          "fee": 5000
+        },
+        {
+          "name": "Birnin Kebbi",
+          "fee": 5000
+        },
+        {
+          "name": "Bunza",
+          "fee": 5000
+        },
+        {
+          "name": "Dandi",
+          "fee": 5000
+        },
+        {
+          "name": "Fakai",
+          "fee": 5000
+        },
+        {
+          "name": "Gwandu",
+          "fee": 5000
+        },
+        {
+          "name": "Jega",
+          "fee": 5000
+        },
+        {
+          "name": "Kalgo",
+          "fee": 5000
+        },
+        {
+          "name": "Koko/Besse",
+          "fee": 5000
+        },
+        {
+          "name": "Maiyama",
+          "fee": 5000
+        },
+        {
+          "name": "Ngaski",
+          "fee": 5000
+        },
+        {
+          "name": "Sakaba",
+          "fee": 5000
+        },
+        {
+          "name": "Shanga",
+          "fee": 5000
+        },
+        {
+          "name": "Suru",
+          "fee": 5000
+        },
+        {
+          "name": "Wasagu/Danko",
+          "fee": 5000
+        },
+        {
+          "name": "Yauri",
+          "fee": 5000
+        },
+        {
+          "name": "Zuru",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Kogi",
+      "cities": [
+        {
+          "name": "Adavi",
+          "fee": 5000
+        },
+        {
+          "name": "Ajaokuta",
+          "fee": 5000
+        },
+        {
+          "name": "Ankpa",
+          "fee": 5000
+        },
+        {
+          "name": "Bassa",
+          "fee": 5000
+        },
+        {
+          "name": "Dekina",
+          "fee": 5000
+        },
+        {
+          "name": "Ibaji",
+          "fee": 5000
+        },
+        {
+          "name": "Idah",
+          "fee": 5000
+        },
+        {
+          "name": "Igalamela-Odolu",
+          "fee": 5000
+        },
+        {
+          "name": "Ijumu",
+          "fee": 5000
+        },
+        {
+          "name": "Kabba/Bunu",
+          "fee": 5000
+        },
+        {
+          "name": "Kogi",
+          "fee": 5000
+        },
+        {
+          "name": "Lokoja",
+          "fee": 5000
+        },
+        {
+          "name": "Mopa-Muro",
+          "fee": 5000
+        },
+        {
+          "name": "Ofu",
+          "fee": 5000
+        },
+        {
+          "name": "Ogori/Mangongo",
+          "fee": 5000
+        },
+        {
+          "name": "Okehi",
+          "fee": 5000
+        },
+        {
+          "name": "Okene",
+          "fee": 5000
+        },
+        {
+          "name": "Olamabolo",
+          "fee": 5000
+        },
+        {
+          "name": "Omala",
+          "fee": 5000
+        },
+        {
+          "name": "Yagba East",
+          "fee": 5000
+        },
+        {
+          "name": "Yagba West",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Kwara",
+      "cities": [
+        {
+          "name": "Asa",
+          "fee": 5000
+        },
+        {
+          "name": "Baruten",
+          "fee": 5000
+        },
+        {
+          "name": "Edu",
+          "fee": 5000
+        },
+        {
+          "name": "Ekiti",
+          "fee": 5000
+        },
+        {
+          "name": "Ifelodun",
+          "fee": 5000
+        },
+        {
+          "name": "Ilorin East",
+          "fee": 5000
+        },
+        {
+          "name": "Ilorin West",
+          "fee": 5000
+        },
+        {
+          "name": "Irepodun",
+          "fee": 5000
+        },
+        {
+          "name": "Isin",
+          "fee": 5000
+        },
+        {
+          "name": "Kaiama",
+          "fee": 5000
+        },
+        {
+          "name": "Moro",
+          "fee": 5000
+        },
+        {
+          "name": "Offa",
+          "fee": 5000
+        },
+        {
+          "name": "Oke-Ero",
+          "fee": 5000
+        },
+        {
+          "name": "Oyun",
+          "fee": 5000
+        },
+        {
+          "name": "Pategi",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Lagos",
+      "cities": [
+        {
+          "name": "Agege",
+          "fee": 5000
+        },
+        {
+          "name": "Ajeromi-Ifelodun",
+          "fee": 5000
+        },
+        {
+          "name": "Alimosho",
+          "fee": 5000
+        },
+        {
+          "name": "Amuwo-Odofin",
+          "fee": 5000
+        },
+        {
+          "name": "Apapa",
+          "fee": 5000
+        },
+        {
+          "name": "Badagry",
+          "fee": 5000
+        },
+        {
+          "name": "Epe",
+          "fee": 5000
+        },
+        {
+          "name": "Eti-Osa",
+          "fee": 5000
+        },
+        {
+          "name": "Ibeju/Lekki",
+          "fee": 5000
+        },
+        {
+          "name": "Ifako-Ijaye",
+          "fee": 5000
+        },
+        {
+          "name": "Ikeja",
+          "fee": 5000
+        },
+        {
+          "name": "Ikorodu",
+          "fee": 5000
+        },
+        {
+          "name": "Kosofe",
+          "fee": 5000
+        },
+        {
+          "name": "Lagos Island",
+          "fee": 5000
+        },
+        {
+          "name": "Lagos Mainland",
+          "fee": 5000
+        },
+        {
+          "name": "Mushin",
+          "fee": 5000
+        },
+        {
+          "name": "Ojo",
+          "fee": 5000
+        },
+        {
+          "name": "Oshodi-Isolo",
+          "fee": 5000
+        },
+        {
+          "name": "Shomolu",
+          "fee": 5000
+        },
+        {
+          "name": "Surulere",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Nasarawa",
+      "cities": [
+        {
+          "name": "Akwanga",
+          "fee": 5000
+        },
+        {
+          "name": "Awe",
+          "fee": 5000
+        },
+        {
+          "name": "Doma",
+          "fee": 5000
+        },
+        {
+          "name": "Karu",
+          "fee": 5000
+        },
+        {
+          "name": "Keana",
+          "fee": 5000
+        },
+        {
+          "name": "Keffi",
+          "fee": 5000
+        },
+        {
+          "name": "Kokona",
+          "fee": 5000
+        },
+        {
+          "name": "Lafia",
+          "fee": 5000
+        },
+        {
+          "name": "Nasarawa",
+          "fee": 5000
+        },
+        {
+          "name": "Nasarawa-Eggon",
+          "fee": 5000
+        },
+        {
+          "name": "Obi",
+          "fee": 5000
+        },
+        {
+          "name": "Toto",
+          "fee": 5000
+        },
+        {
+          "name": "Wamba",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Niger",
+      "cities": [
+        {
+          "name": "Agaie",
+          "fee": 5000
+        },
+        {
+          "name": "Agwara",
+          "fee": 5000
+        },
+        {
+          "name": "Bida",
+          "fee": 5000
+        },
+        {
+          "name": "Borgu",
+          "fee": 5000
+        },
+        {
+          "name": "Bosso",
+          "fee": 5000
+        },
+        {
+          "name": "Chanchaga",
+          "fee": 5000
+        },
+        {
+          "name": "Edati",
+          "fee": 5000
+        },
+        {
+          "name": "Gbako",
+          "fee": 5000
+        },
+        {
+          "name": "Gurara",
+          "fee": 5000
+        },
+        {
+          "name": "Katcha",
+          "fee": 5000
+        },
+        {
+          "name": "Kontagora",
+          "fee": 5000
+        },
+        {
+          "name": "Lapai",
+          "fee": 5000
+        },
+        {
+          "name": "Lavun",
+          "fee": 5000
+        },
+        {
+          "name": "Magama",
+          "fee": 5000
+        },
+        {
+          "name": "Mariga",
+          "fee": 5000
+        },
+        {
+          "name": "Mashegu",
+          "fee": 5000
+        },
+        {
+          "name": "Mokwa",
+          "fee": 5000
+        },
+        {
+          "name": "Muya",
+          "fee": 5000
+        },
+        {
+          "name": "Pailoro",
+          "fee": 5000
+        },
+        {
+          "name": "Rafi",
+          "fee": 5000
+        },
+        {
+          "name": "Rijau",
+          "fee": 5000
+        },
+        {
+          "name": "Shiroro",
+          "fee": 5000
+        },
+        {
+          "name": "Suleja",
+          "fee": 5000
+        },
+        {
+          "name": "Tafa",
+          "fee": 5000
+        },
+        {
+          "name": "Wushishi",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Ogun",
+      "cities": [
+        {
+          "name": "Abeokuta North",
+          "fee": 5000
+        },
+        {
+          "name": "Abeokuta South",
+          "fee": 5000
+        },
+        {
+          "name": "Ado-Odo/Ota",
+          "fee": 5000
+        },
+        {
+          "name": "Ewekoro",
+          "fee": 5000
+        },
+        {
+          "name": "Ifo",
+          "fee": 5000
+        },
+        {
+          "name": "Ijebu East",
+          "fee": 5000
+        },
+        {
+          "name": "Ijebu North",
+          "fee": 5000
+        },
+        {
+          "name": "Ijebu North East",
+          "fee": 5000
+        },
+        {
+          "name": "Ijebu Ode",
+          "fee": 5000
+        },
+        {
+          "name": "Ikenne",
+          "fee": 5000
+        },
+        {
+          "name": "Imeko-Afon",
+          "fee": 5000
+        },
+        {
+          "name": "Ipokia",
+          "fee": 5000
+        },
+        {
+          "name": "Obafemi-Owode",
+          "fee": 5000
+        },
+        {
+          "name": "Odeda",
+          "fee": 5000
+        },
+        {
+          "name": "Odogbolu",
+          "fee": 5000
+        },
+        {
+          "name": "Ogun Waterside",
+          "fee": 5000
+        },
+        {
+          "name": "Remo North",
+          "fee": 5000
+        },
+        {
+          "name": "Shagamu",
+          "fee": 5000
+        },
+        {
+          "name": "Yewa North",
+          "fee": 5000
+        },
+        {
+          "name": "Yewa South",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Ondo",
+      "cities": [
+        {
+          "name": "Akoko North East",
+          "fee": 5000
+        },
+        {
+          "name": "Akoko North West",
+          "fee": 5000
+        },
+        {
+          "name": "Akoko South Akure East",
+          "fee": 5000
+        },
+        {
+          "name": "Akoko South West",
+          "fee": 5000
+        },
+        {
+          "name": "Akure North",
+          "fee": 5000
+        },
+        {
+          "name": "Akure South",
+          "fee": 5000
+        },
+        {
+          "name": "Ese-Odo",
+          "fee": 5000
+        },
+        {
+          "name": "Idanre",
+          "fee": 5000
+        },
+        {
+          "name": "Ifedore",
+          "fee": 5000
+        },
+        {
+          "name": "Ilaje",
+          "fee": 5000
+        },
+        {
+          "name": "Ile-Oluji",
+          "fee": 5000
+        },
+        {
+          "name": "Irele",
+          "fee": 5000
+        },
+        {
+          "name": "Odigbo",
+          "fee": 5000
+        },
+        {
+          "name": "Okeigbo",
+          "fee": 5000
+        },
+        {
+          "name": "Okitipupa",
+          "fee": 5000
+        },
+        {
+          "name": "Ondo East",
+          "fee": 5000
+        },
+        {
+          "name": "Ondo West",
+          "fee": 5000
+        },
+        {
+          "name": "Ose",
+          "fee": 5000
+        },
+        {
+          "name": "Owo",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Osun",
+      "cities": [
+        {
+          "name": "Aiyedade",
+          "fee": 5000
+        },
+        {
+          "name": "Aiyedire",
+          "fee": 5000
+        },
+        {
+          "name": "Atakumosa East",
+          "fee": 5000
+        },
+        {
+          "name": "Atakumosa West",
+          "fee": 5000
+        },
+        {
+          "name": "Boluwaduro",
+          "fee": 5000
+        },
+        {
+          "name": "Boripe",
+          "fee": 5000
+        },
+        {
+          "name": "Ede North",
+          "fee": 5000
+        },
+        {
+          "name": "Ede South",
+          "fee": 5000
+        },
+        {
+          "name": "Egbedore",
+          "fee": 5000
+        },
+        {
+          "name": "Ejigbo",
+          "fee": 5000
+        },
+        {
+          "name": "Ife Central",
+          "fee": 5000
+        },
+        {
+          "name": "Ife East",
+          "fee": 5000
+        },
+        {
+          "name": "Ife North",
+          "fee": 5000
+        },
+        {
+          "name": "Ife South",
+          "fee": 5000
+        },
+        {
+          "name": "Ifedayo",
+          "fee": 5000
+        },
+        {
+          "name": "Ifelodun",
+          "fee": 5000
+        },
+        {
+          "name": "Ila",
+          "fee": 5000
+        },
+        {
+          "name": "Ilesha East",
+          "fee": 5000
+        },
+        {
+          "name": "Ilesha West",
+          "fee": 5000
+        },
+        {
+          "name": "Irepodun",
+          "fee": 5000
+        },
+        {
+          "name": "Irewole",
+          "fee": 5000
+        },
+        {
+          "name": "Isokan",
+          "fee": 5000
+        },
+        {
+          "name": "Iwo",
+          "fee": 5000
+        },
+        {
+          "name": "Obokun",
+          "fee": 5000
+        },
+        {
+          "name": "Odo-Otin",
+          "fee": 5000
+        },
+        {
+          "name": "Ola-Oluwa",
+          "fee": 5000
+        },
+        {
+          "name": "Olorunda",
+          "fee": 5000
+        },
+        {
+          "name": "Oriade",
+          "fee": 5000
+        },
+        {
+          "name": "Orolu",
+          "fee": 5000
+        },
+        {
+          "name": "Osogbo",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Oyo",
+      "cities": [
+        {
+          "name": "Afijio",
+          "fee": 5000
+        },
+        {
+          "name": "Akinyele",
+          "fee": 5000
+        },
+        {
+          "name": "Atiba",
+          "fee": 5000
+        },
+        {
+          "name": "Atisbo",
+          "fee": 5000
+        },
+        {
+          "name": "Egbeda",
+          "fee": 5000
+        },
+        {
+          "name": "Ibadan Central",
+          "fee": 5000
+        },
+        {
+          "name": "Ibadan North",
+          "fee": 5000
+        },
+        {
+          "name": "Ibadan North West",
+          "fee": 5000
+        },
+        {
+          "name": "Ibadan South East",
+          "fee": 5000
+        },
+        {
+          "name": "Ibadan South West",
+          "fee": 5000
+        },
+        {
+          "name": "Ibarapa Central",
+          "fee": 5000
+        },
+        {
+          "name": "Ibarapa East",
+          "fee": 5000
+        },
+        {
+          "name": "Ibarapa North",
+          "fee": 5000
+        },
+        {
+          "name": "Ido",
+          "fee": 5000
+        },
+        {
+          "name": "Irepo",
+          "fee": 5000
+        },
+        {
+          "name": "Iseyin",
+          "fee": 5000
+        },
+        {
+          "name": "Itesiwaju",
+          "fee": 5000
+        },
+        {
+          "name": "Iwajowa",
+          "fee": 5000
+        },
+        {
+          "name": "Kajola",
+          "fee": 5000
+        },
+        {
+          "name": "Lagelu Ogbomosho North",
+          "fee": 5000
+        },
+        {
+          "name": "Ogbomosho South",
+          "fee": 5000
+        },
+        {
+          "name": "Ogo Oluwa",
+          "fee": 5000
+        },
+        {
+          "name": "Olorunsogo",
+          "fee": 5000
+        },
+        {
+          "name": "Oluyole",
+          "fee": 5000
+        },
+        {
+          "name": "Ona-Ara",
+          "fee": 5000
+        },
+        {
+          "name": "Orelope",
+          "fee": 5000
+        },
+        {
+          "name": "Ori Ire",
+          "fee": 5000
+        },
+        {
+          "name": "Oyo East",
+          "fee": 5000
+        },
+        {
+          "name": "Oyo West",
+          "fee": 5000
+        },
+        {
+          "name": "Saki East",
+          "fee": 5000
+        },
+        {
+          "name": "Saki West",
+          "fee": 5000
+        },
+        {
+          "name": "Surulere",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Plateau",
+      "cities": [
+        {
+          "name": "Barikin Ladi",
+          "fee": 5000
+        },
+        {
+          "name": "Bassa",
+          "fee": 5000
+        },
+        {
+          "name": "Bokkos",
+          "fee": 5000
+        },
+        {
+          "name": "Jos East",
+          "fee": 5000
+        },
+        {
+          "name": "Jos North",
+          "fee": 5000
+        },
+        {
+          "name": "Jos South",
+          "fee": 5000
+        },
+        {
+          "name": "Kanam",
+          "fee": 5000
+        },
+        {
+          "name": "Kanke",
+          "fee": 5000
+        },
+        {
+          "name": "Langtang North",
+          "fee": 5000
+        },
+        {
+          "name": "Langtang South",
+          "fee": 5000
+        },
+        {
+          "name": "Mangu",
+          "fee": 5000
+        },
+        {
+          "name": "Mikang",
+          "fee": 5000
+        },
+        {
+          "name": "Pankshin",
+          "fee": 5000
+        },
+        {
+          "name": "Qua'an Pan",
+          "fee": 5000
+        },
+        {
+          "name": "Riyom",
+          "fee": 5000
+        },
+        {
+          "name": "Shendam",
+          "fee": 5000
+        },
+        {
+          "name": "Wase",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Rivers",
+      "cities": [
+        {
+          "name": "Abua/Odual",
+          "fee": 5000
+        },
+        {
+          "name": "Ahoada East",
+          "fee": 5000
+        },
+        {
+          "name": "Ahoada West",
+          "fee": 5000
+        },
+        {
+          "name": "Akuku Toru",
+          "fee": 5000
+        },
+        {
+          "name": "Andoni",
+          "fee": 5000
+        },
+        {
+          "name": "Asari-Toru",
+          "fee": 5000
+        },
+        {
+          "name": "Bonny",
+          "fee": 5000
+        },
+        {
+          "name": "Degema",
+          "fee": 5000
+        },
+        {
+          "name": "Eleme",
+          "fee": 5000
+        },
+        {
+          "name": "Emohua",
+          "fee": 5000
+        },
+        {
+          "name": "Etche",
+          "fee": 5000
+        },
+        {
+          "name": "Gokana",
+          "fee": 5000
+        },
+        {
+          "name": "Ikwerre",
+          "fee": 5000
+        },
+        {
+          "name": "Khana",
+          "fee": 5000
+        },
+        {
+          "name": "Obio/Akpor",
+          "fee": 5000
+        },
+        {
+          "name": "Ogba/Egbema/Ndoni",
+          "fee": 5000
+        },
+        {
+          "name": "Ogu/Bolo",
+          "fee": 5000
+        },
+        {
+          "name": "Okrika",
+          "fee": 5000
+        },
+        {
+          "name": "Omumma",
+          "fee": 5000
+        },
+        {
+          "name": "Opobo/Nkoro",
+          "fee": 5000
+        },
+        {
+          "name": "Oyigbo",
+          "fee": 5000
+        },
+        {
+          "name": "Port-Harcourt",
+          "fee": 5000
+        },
+        {
+          "name": "Tai",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Sokoto",
+      "cities": [
+        {
+          "name": "Binji",
+          "fee": 5000
+        },
+        {
+          "name": "Bodinga",
+          "fee": 5000
+        },
+        {
+          "name": "Dange-shnsi",
+          "fee": 5000
+        },
+        {
+          "name": "Gada",
+          "fee": 5000
+        },
+        {
+          "name": "Gawabawa",
+          "fee": 5000
+        },
+        {
+          "name": "Goronyo",
+          "fee": 5000
+        },
+        {
+          "name": "Gudu",
+          "fee": 5000
+        },
+        {
+          "name": "Illela",
+          "fee": 5000
+        },
+        {
+          "name": "Isa",
+          "fee": 5000
+        },
+        {
+          "name": "kebbe",
+          "fee": 5000
+        },
+        {
+          "name": "Kware",
+          "fee": 5000
+        },
+        {
+          "name": "Rabah",
+          "fee": 5000
+        },
+        {
+          "name": "Sabon birni",
+          "fee": 5000
+        },
+        {
+          "name": "Shagari",
+          "fee": 5000
+        },
+        {
+          "name": "Silame",
+          "fee": 5000
+        },
+        {
+          "name": "Sokoto North",
+          "fee": 5000
+        },
+        {
+          "name": "Sokoto South",
+          "fee": 5000
+        },
+        {
+          "name": "Tambuwal",
+          "fee": 5000
+        },
+        {
+          "name": "Tqngaza",
+          "fee": 5000
+        },
+        {
+          "name": "Tureta",
+          "fee": 5000
+        },
+        {
+          "name": "Wamako",
+          "fee": 5000
+        },
+        {
+          "name": "Wurno",
+          "fee": 5000
+        },
+        {
+          "name": "Yabo",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Taraba",
+      "cities": [
+        {
+          "name": "Ardo-kola",
+          "fee": 5000
+        },
+        {
+          "name": "Bali",
+          "fee": 5000
+        },
+        {
+          "name": "Cassol",
+          "fee": 5000
+        },
+        {
+          "name": "Donga",
+          "fee": 5000
+        },
+        {
+          "name": "Gashaka",
+          "fee": 5000
+        },
+        {
+          "name": "Ibi",
+          "fee": 5000
+        },
+        {
+          "name": "Jalingo",
+          "fee": 5000
+        },
+        {
+          "name": "Karin-Lamido",
+          "fee": 5000
+        },
+        {
+          "name": "Kurmi",
+          "fee": 5000
+        },
+        {
+          "name": "Lau",
+          "fee": 5000
+        },
+        {
+          "name": "Sardauna",
+          "fee": 5000
+        },
+        {
+          "name": "Takum",
+          "fee": 5000
+        },
+        {
+          "name": "Ussa",
+          "fee": 5000
+        },
+        {
+          "name": "Wukari",
+          "fee": 5000
+        },
+        {
+          "name": "Yorro",
+          "fee": 5000
+        },
+        {
+          "name": "Zing",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Yobe",
+      "cities": [
+        {
+          "name": "Bade",
+          "fee": 5000
+        },
+        {
+          "name": "Bursari",
+          "fee": 5000
+        },
+        {
+          "name": "Damaturu",
+          "fee": 5000
+        },
+        {
+          "name": "Fika",
+          "fee": 5000
+        },
+        {
+          "name": "Fune",
+          "fee": 5000
+        },
+        {
+          "name": "Geidam",
+          "fee": 5000
+        },
+        {
+          "name": "Gujba",
+          "fee": 5000
+        },
+        {
+          "name": "Gulani",
+          "fee": 5000
+        },
+        {
+          "name": "Jakusko",
+          "fee": 5000
+        },
+        {
+          "name": "Karasuwa",
+          "fee": 5000
+        },
+        {
+          "name": "Karawa",
+          "fee": 5000
+        },
+        {
+          "name": "Machina",
+          "fee": 5000
+        },
+        {
+          "name": "Nangere",
+          "fee": 5000
+        },
+        {
+          "name": "Nguru Potiskum",
+          "fee": 5000
+        },
+        {
+          "name": "Tarmua",
+          "fee": 5000
+        },
+        {
+          "name": "Yunusari",
+          "fee": 5000
+        },
+        {
+          "name": "Yusufari",
+          "fee": 5000
+        }
+      ]
+    },
+    {
+      "name": "Zamfara",
+      "cities": [
+        {
+          "name": "Anka",
+          "fee": 5000
+        },
+        {
+          "name": "Bakura",
+          "fee": 5000
+        },
+        {
+          "name": "Birnin Magaji",
+          "fee": 5000
+        },
+        {
+          "name": "Bukkuyum",
+          "fee": 5000
+        },
+        {
+          "name": "Bungudu",
+          "fee": 5000
+        },
+        {
+          "name": "Gummi",
+          "fee": 5000
+        },
+        {
+          "name": "Gusau",
+          "fee": 5000
+        },
+        {
+          "name": "Kaura",
+          "fee": 5000
+        },
+        {
+          "name": "Maradun",
+          "fee": 5000
+        },
+        {
+          "name": "Maru",
+          "fee": 5000
+        },
+        {
+          "name": "Namoda",
+          "fee": 5000
+        },
+        {
+          "name": "Shinkafi",
+          "fee": 5000
+        },
+        {
+          "name": "Talata Mafara",
+          "fee": 5000
+        },
+        {
+          "name": "Tsafe",
+          "fee": 5000
+        },
+        {
+          "name": "Zurmi",
+          "fee": 5000
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+[
+  {
+    "id": 1769083054346,
+    "reference": "KL_1769083045488",
+    "name": "Segun Yiga",
+    "email": "dollarmastar@gmail.com",
+    "phone": "09087654356",
+    "shippingType": "delivery",
+    "state": "Lagos",
+    "city": "ikorodu",
+    "address": "trtrtr",
+    "cart": [
+      {
+        "name": "Body Oil",
+        "qty": 4,
+        "price": 8500,
+        "total": 34000
+      },
+      {
+        "name": "Body Butter",
+        "qty": 3,
+        "price": 10000,
+        "total": 30000
+      }
+    ],
+    "deliveryFee": 5000,
+    "total": 69000,
+    "status": "Delivered"
+  },
+  {
+    "id": 1769491948464,
+    "reference": "KIKELARA_1769491948235",
+    "createdAt": "2026-01-27T05:32:28.236Z",
+    "status": "Delivered",
+    "name": "jdd",
+    "email": "dollarmastar@gmail.com",
+    "phone": "09087654356",
+    "shippingType": "delivery",
+    "state": "Edo",
+    "city": "Benin City",
+    "address": "fddg",
+    "cart": [
+      {
+        "id": 2,
+        "name": "Bright Aura Oil",
+        "price": 10000,
+        "qty": 4,
+        "image": "images/bodyOil.JPG",
+        "total": 40000
+      }
+    ],
+    "subtotal": 40000,
+    "deliveryFee": 5000,
+    "total": 45000,
+    "paystackRef": "KIKELARA_1769491938895"
+  },
+  {
+    "id": 1770429276349,
+    "reference": "KIKELARA_1770429276061",
+    "createdAt": "2026-02-07T01:54:36.061Z",
+    "status": "Pending",
+    "name": "Segun Yiga",
+    "email": "dollarmastar@gmail.com",
+    "phone": "09087654356",
+    "shippingType": "delivery",
+    "state": "Lagos",
+    "city": "Ikeja",
+    "address": "lkjjhk",
+    "cart": [
+      {
+        "id": 7,
+        "name": "Glow Elixir Oil",
+        "price": 8500,
+        "qty": 4,
+        "image": "images/bodyOil.JPG",
+        "total": 34000
+      },
+      {
+        "id": 4,
+        "name": "Hair Oil",
+        "price": 7500,
+        "qty": 1,
+        "image": "images/hairOil1.JPG",
+        "total": 7500
+      },
+      {
+        "id": 2,
+        "name": "Bright Aura Oil",
+        "price": 10000,
+        "qty": 5,
+        "image": "images/bodyOil.JPG",
+        "total": 50000
+      },
+      {
+        "id": 3,
+        "name": "Hair Butter",
+        "price": 5500,
+        "qty": 3,
+        "image": "images/hairButter.png",
+        "total": 16500
+      },
+      {
+        "id": 1,
+        "name": "Body Butter",
+        "price": 10000,
+        "qty": 1,
+        "image": "images_brown/bodyButter.png",
+        "total": 10000
+      }
+    ],
+    "subtotal": 118000,
+    "deliveryFee": 5000,
+    "total": 123000,
+    "paystackRef": "KIKELARA_1770429268048"
+  }
+]

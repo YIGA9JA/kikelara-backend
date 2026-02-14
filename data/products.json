@@ -1,0 +1,108 @@
+[[
+  {
+    "id": 1,
+    "name": "Body Butter",
+    "category": "Body",
+    "price": 10000,
+    "discount": 0,
+    "image": "images_brown/bodyButter.png",
+    "images": [
+      "images_brown/bodyButter.png",
+      "images_brown/bodyButter.png",
+      "images_brown/bodyButter.png",
+      "images_brown/bodyButter.png"
+    ],
+    "description": "Shea Butter, Almond Oil, Mango Butter, Cocoa Butter, Glycerin."
+  },
+  {
+    "id": 2,
+    "name": "Bright Aura Oil",
+    "category": "Oil",
+    "price": 10000,
+    "discount": 0,
+    "image": "images_brown/bodyOil.png",
+    "images": [
+      "images_brown/bodyOil.png",
+      "images_brown/bodyOil.png",
+      "images_brown/bodyOil.png",
+      "images_brown/bodyOil.png"
+    ],
+    "description": "Jojoba Oil, Carrot Oil, Palm Kernel Oil, Almond Oil, Vitamin E."
+  },
+  {
+    "id": 3,
+    "name": "Hair Butter",
+    "category": "Serum",
+    "price": 5500,
+    "discount": 0,
+    "image": "images_brown/hairButter.png",
+    "images": [
+      "images_brown/hairButter.png",
+      "images_brown/hairButter.png",
+      "images_brown/hairButter.png",
+      "images_brown/hairButter.png"
+    ],
+    "description": "Strengthens and moisturizes hair deeply."
+  },
+  {
+    "id": 4,
+    "name": "Hair Oil",
+    "category": "Serum",
+    "price": 5500,
+    "discount": 0,
+    "image": "images_brown/hairOil.png",
+    "images": [
+      "images_brown/hairOil.png",
+      "images_brown/hairOil.png",
+      "images_brown/hairOil.png",
+      "images_brown/hairOil.png"
+    ],
+    "description": "Strengthens and moisturizes hair deeply."
+  },
+  {
+    "id": 5,
+    "name": "Baby Body Butter",
+    "category": "Body",
+    "price": 10000,
+    "discount": 0,
+    "image": "images_brown/BabyBodyButter.png",
+    "images": [
+      "images_brown/BabyBodyButter.png",
+      "images_brown/BabyBodyButter.png",
+      "images_brown/BabyBodyButter.png",
+      "images_brown/BabyBodyButter.png"
+    ],
+    "description": "Gentle care, naturally."
+  },
+  {
+    "id": 6,
+    "name": "Body Butter (Fruity)",
+    "category": "Body",
+    "price": 10000,
+    "discount": 0,
+    "image": "images_brown/bodyButter(Fruity).png",
+    "images": [
+      "images_brown/bodyButter(Fruity).png",
+      "images_brown/bodyButter(Fruity).png",
+      "images_brown/bodyButter(Fruity).png",
+      "images_brown/bodyButter(Fruity).png"
+    ],
+    "description": "Whisper of fruity freshness. Gentle care, naturally."
+  },
+  {
+    "id": 7,
+    "name": "Glow Elixir Oil",
+    "category": "Oil",
+    "price": 8500,
+    "discount": 0,
+    "image": "images_brown/glowElixir.png",
+    "images": [
+      "images_brown/glowElixir.png",
+      "images_brown/glowElixir.png",
+      "images_brown/glowElixir.png",
+      "images_brown/glowElixir.png"
+    ],
+    "description": "Jojoba Oil, Carrot Oil, Palm Kernel Oil, Almond Oil, Vitamin E."
+  }
+]
+]
