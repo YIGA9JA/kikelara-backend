@@ -30,11 +30,13 @@ const helmet = require("helmet");
 const compression = require("compression");
 const multer = require("multer");
 const { Pool } = require("pg");
+const sharp = require("sharp");
 const { z, ZodError } = require("zod");
+const cookieParser = require("cookie-parser"); // ✅ NEW
 
 // ✅ Security middleware
 const rateLimit = require("express-rate-limit");
-const slowDown = require("express-slow-down"); // ✅ FIXED (was wrongly express-rate-limit)
+const slowDown = require("express-slow-down");
 const xss = require("xss-clean");
 const mongoSanitize = require("express-mongo-sanitize");
 const hpp = require("hpp");
@@ -51,24 +53,42 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.disable("x-powered-by");
-app.disable("etag"); // ok for APIs
+app.disable("etag");
 
 /* ===================== CONFIG ===================== */
 const SERVICE_NAME = process.env.SERVICE_NAME || "kikelara-api";
 const ENV = process.env.NODE_ENV || "development";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "CHANGE_ME_SUPER_SECRET";
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || ""; // bcrypt hash required
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
 
 // optional 2FA
-const ADMIN_TOTP_SECRET = process.env.ADMIN_TOTP_SECRET || ""; // base32 secret (optional)
+const ADMIN_TOTP_SECRET = process.env.ADMIN_TOTP_SECRET || "";
 
 // Paystack
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "";
 
-// ✅ Fetch for Paystack verify (Node 18+ has fetch)
-// NOTE: You have node-fetch@3 in package.json which is ESM-only, so require("node-fetch") will crash.
-// We'll rely on global fetch, and fallback to dynamic import only if needed.
+// ✅ Cookie/session settings
+const IS_PROD = process.env.NODE_ENV === "production";
+const COOKIE_NAME = "admin_session";
+const CSRF_COOKIE = "admin_csrf";
+
+// ⚠️ If frontend and backend are different domains (Vercel + Render), you MUST use SameSite=None; Secure in production.
+const COOKIE_OPTS = {
+  httpOnly: true,
+  secure: IS_PROD,               // Secure required when SameSite=None
+  sameSite: IS_PROD ? "none" : "lax",
+  path: "/",
+};
+
+const CSRF_COOKIE_OPTS = {
+  httpOnly: false,               // must be readable by browser JS
+  secure: IS_PROD,
+  sameSite: IS_PROD ? "none" : "lax",
+  path: "/",
+};
+
+/* ===================== Fetch helper ===================== */
 let fetchFn = global.fetch;
 async function ensureFetch() {
   if (fetchFn) return fetchFn;
@@ -81,15 +101,38 @@ async function ensureFetch() {
   return fetchFn;
 }
 
-/**
- * IMPORTANT:
- * Set DATABASE_URL on Render backend env:
- * DATABASE_URL=postgresql://user:pass@host:5432/db
- */
+/* ===================== CAPTCHA (HCAPTCHA) ===================== */
+const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY || "";
+const CAPTCHA_REQUIRED = String(process.env.CAPTCHA_REQUIRED || "true").toLowerCase() !== "false";
+
+async function verifyHCaptchaToken(token, ip) {
+  if (!CAPTCHA_REQUIRED) return true;
+  if (!HCAPTCHA_SECRET_KEY) return false;
+  if (!token) return false;
+
+  const f = await ensureFetch();
+  if (!f) throw new Error("fetch not available (captcha verify)");
+
+  const form = new URLSearchParams();
+  form.append("secret", HCAPTCHA_SECRET_KEY);
+  form.append("response", String(token));
+  if (ip) form.append("remoteip", String(ip));
+
+  const r = await f("https://hcaptcha.com/siteverify", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString()
+  });
+
+  const data = await r.json().catch(() => null);
+  return Boolean(data?.success);
+}
+
+/* ===================== DB ===================== */
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+      ssl: IS_PROD ? { rejectUnauthorized: false } : false
     })
   : null;
 
@@ -98,22 +141,20 @@ async function dbQuery(text, params) {
   return pool.query(text, params);
 }
 
+/* ===================== CORS ===================== */
 // Your frontend domain(s)
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
 
-// Default origins if env not set:
 const ALLOW_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://127.0.0.1:5500",
   "http://localhost:5500",
-
   "https://kikelara1.vercel.app",
   "https://www.kikelara1.vercel.app",
-
   ...FRONTEND_ORIGINS
 ];
 
@@ -121,14 +162,7 @@ const ALLOW_ORIGINS = [
 function nowIso() { return new Date().toISOString(); }
 
 function log(level, event, payload = {}) {
-  const line = {
-    ts: nowIso(),
-    level,
-    service: SERVICE_NAME,
-    env: ENV,
-    event,
-    ...payload
-  };
+  const line = { ts: nowIso(), level, service: SERVICE_NAME, env: ENV, event, ...payload };
   console.log(JSON.stringify(line));
 }
 const logInfo = (e, p) => log("info", e, p);
@@ -145,24 +179,8 @@ function getClientIp(req) {
 }
 
 const SENSITIVE_KEYWORDS = [
-  "authorization",
-  "cookie",
-  "set-cookie",
-  "token",
-  "access_token",
-  "refresh_token",
-  "password",
-  "pass",
-  "secret",
-  "api_key",
-  "apikey",
-  "key",
-  "pin",
-  "code",
-  "otp",
-  "paystack",
-  "card",
-  "cvv"
+  "authorization","cookie","set-cookie","token","access_token","refresh_token",
+  "password","pass","secret","api_key","apikey","key","pin","code","otp","paystack","card","cvv"
 ];
 
 function isSensitiveKey(k) {
@@ -172,14 +190,10 @@ function isSensitiveKey(k) {
 
 function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
   const seen = new WeakSet();
-
   function walk(x, d) {
     if (x === null || x === undefined) return x;
-
     if (typeof x === "string") return x.length > maxString ? x.slice(0, maxString) + "…" : x;
     if (typeof x === "number" || typeof x === "boolean") return x;
-
-    // Buffer (webhook raw body)
     if (Buffer.isBuffer(x)) return `[Buffer ${x.length} bytes]`;
 
     if (typeof x === "object") {
@@ -198,10 +212,8 @@ function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
       }
       return out;
     }
-
     return String(x);
   }
-
   return walk(obj, depth);
 }
 
@@ -217,7 +229,7 @@ function safeHeaders(req) {
       continue;
     }
 
-    if (["origin", "referer", "user-agent", "content-type", "accept", "x-forwarded-proto", "x-paystack-signature"].includes(lk)) {
+    if (["origin","referer","user-agent","content-type","accept","x-forwarded-proto","x-paystack-signature","x-csrf-token"].includes(lk)) {
       keep[lk] = typeof v === "string" ? (v.length > 300 ? v.slice(0, 300) + "…" : v) : v;
       continue;
     }
@@ -241,22 +253,17 @@ function shouldLogBody(req) {
   const p = req.path || "";
   if (req.method === "GET" || req.method === "HEAD") return false;
 
-  // never log auth payloads
   if (p.startsWith("/admin/login")) return false;
-
-  // never log PII-heavy endpoints
   if (p.startsWith("/orders") || p.startsWith("/order")) return false;
   if (p.startsWith("/api/contact") || p.startsWith("/api/newsletter")) return false;
   if (p.startsWith("/admin/products")) return false;
-
-  // webhook raw body is sensitive
   if (p.startsWith("/payments/paystack/webhook")) return false;
 
   return true;
 }
 
 /* ===================== TEMP BAN LIST ===================== */
-const banMap = new Map(); // ip -> { until, reason, hits }
+const banMap = new Map();
 
 function isBanned(ip) {
   const v = banMap.get(ip);
@@ -272,12 +279,11 @@ function banIp(ip, minutes, reason) {
   const until = Date.now() + minutes * 60 * 1000;
   const prev = banMap.get(ip);
   const hits = (prev?.hits || 0) + 1;
-
   banMap.set(ip, { until, reason, hits });
   logWarn("security.temp_ban", { ip, minutes, reason, until: new Date(until).toISOString(), hits });
 }
 
-/* ===================== REQUEST LOGGER (ALL REQUESTS) ===================== */
+/* ===================== REQUEST LOGGER ===================== */
 app.use((req, res, next) => {
   const rid = makeRid();
   req.rid = rid;
@@ -285,7 +291,6 @@ app.use((req, res, next) => {
 
   const ip = getClientIp(req);
 
-  // block banned IPs early
   if (isBanned(ip)) {
     logWarn("security.banned_request", { rid, ip, method: req.method, path: req.originalUrl });
     return res.status(403).json({ success: false, message: "Access blocked. Try later." });
@@ -306,14 +311,7 @@ app.use((req, res, next) => {
     const end = process.hrtime.bigint();
     const ms = Number(end - start) / 1e6;
 
-    const payload = {
-      rid,
-      ip,
-      method: req.method,
-      path: req.originalUrl,
-      status: res.statusCode,
-      ms: Math.round(ms)
-    };
+    const payload = { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms) };
 
     if (shouldLogBody(req) && req.body && typeof req.body === "object") {
       payload.body = safeClone(req.body, { maxString: 400, maxArray: 25, depth: 2 });
@@ -328,15 +326,7 @@ app.use((req, res, next) => {
     if (!res.writableEnded) {
       const end = process.hrtime.bigint();
       const ms = Number(end - start) / 1e6;
-      logWarn("http.close", {
-        rid,
-        ip,
-        method: req.method,
-        path: req.originalUrl,
-        status: res.statusCode,
-        ms: Math.round(ms),
-        note: "client_aborted"
-      });
+      logWarn("http.close", { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms), note: "client_aborted" });
     }
   });
 
@@ -361,10 +351,7 @@ function validate(schema, where = "body") {
         return res.status(400).json({
           success: false,
           message: "Validation failed",
-          details: err.issues.map(i => ({
-            field: i.path.join("."),
-            message: i.message
-          }))
+          details: err.issues.map(i => ({ field: i.path.join("."), message: i.message }))
         });
       }
       next(err);
@@ -379,9 +366,9 @@ const zISODateStr = z.string().refine(v => !Number.isNaN(new Date(v).getTime()),
 /* ===================== SECURITY + MIDDLEWARE ===================== */
 app.set("trust proxy", 1);
 
-/** ✅ Force HTTPS in production (Render uses proxy header) */
+/** ✅ Force HTTPS in production */
 app.use((req, res, next) => {
-  if (process.env.NODE_ENV === "production") {
+  if (IS_PROD) {
     const proto = req.headers["x-forwarded-proto"];
     if (proto && proto !== "https") {
       return res.redirect(301, "https://" + req.headers.host + req.originalUrl);
@@ -404,7 +391,7 @@ app.use((req, res, next) => {
 
 app.use(compression());
 
-/* ✅ Rate limiting + slow down (WITH 429 SECURITY LOGS) */
+/* ✅ Rate limiting + slow down */
 function rateLimitWithSecurityLog(name, opts) {
   return rateLimit({
     ...opts,
@@ -425,10 +412,7 @@ function rateLimitWithSecurityLog(name, opts) {
 
       banIp(ip, 10, `rate_limit:${name}`);
 
-      res.status(429).json({
-        success: false,
-        message: "Too many requests. Please try again later."
-      });
+      res.status(429).json({ success: false, message: "Too many requests. Please try again later." });
     }
   });
 }
@@ -437,17 +421,16 @@ const globalLimiter = rateLimitWithSecurityLog("global", { windowMs: 15 * 60 * 1
 const authLimiter   = rateLimitWithSecurityLog("auth",   { windowMs: 10 * 60 * 1000, max: 25 });
 const writeLimiter  = rateLimitWithSecurityLog("write",  { windowMs: 5 * 60 * 1000,  max: 60 });
 
-// ✅ Slow-down (real)
 const speedLimiter = slowDown({
   windowMs: 15 * 60 * 1000,
-  delayAfter: 120,              // after 120 requests in 15 mins, start delaying
-  delayMs: () => 250            // 250ms per request over limit
+  delayAfter: 120,
+  delayMs: () => 250
 });
 
 app.use(globalLimiter);
 app.use(speedLimiter);
 
-/* ✅ CORS */
+/* ✅ CORS (MUST allow credentials for cookie auth) */
 const corsOptions = {
   origin: function (origin, cb) {
     if (!origin) return cb(null, true);
@@ -455,14 +438,30 @@ const corsOptions = {
     return cb(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","x-paystack-signature"],
-  credentials: false,
+  allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","x-paystack-signature"],
+  credentials: true, // ✅ IMPORTANT
   optionsSuccessStatus: 204
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* ===================== PAYSTACK VERIFY (SERVER-SIDE) ===================== */
+/* ✅ Cookies */
+app.use(cookieParser(ADMIN_SECRET));
+
+/* ===================== PAYSTACK WEBHOOK RAW ROUTE (MUST be BEFORE express.json) ===================== */
+function paystackSignatureValid(rawBodyBuffer, signature) {
+  if (!PAYSTACK_SECRET_KEY) return false;
+  if (!rawBodyBuffer || !Buffer.isBuffer(rawBodyBuffer)) return false;
+  if (!signature) return false;
+
+  const hash = crypto
+    .createHmac("sha512", PAYSTACK_SECRET_KEY)
+    .update(rawBodyBuffer)
+    .digest("hex");
+
+  return hash === signature;
+}
+
 async function verifyPaystack(reference) {
   if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
   const f = await ensureFetch();
@@ -486,26 +485,6 @@ async function verifyPaystack(reference) {
   return data;
 }
 
-/* ===================== PAYSTACK WEBHOOK (RAW BODY + SIGNATURE + REPLAY PROTECTION) ===================== */
-/**
- * Webhook URL:
- * https://kikelara1.onrender.com/payments/paystack/webhook
- *
- * RAW is required because signature uses exact raw bytes.
- */
-function paystackSignatureValid(rawBodyBuffer, signature) {
-  if (!PAYSTACK_SECRET_KEY) return false;
-  if (!rawBodyBuffer || !Buffer.isBuffer(rawBodyBuffer)) return false;
-  if (!signature) return false;
-
-  const hash = crypto
-    .createHmac("sha512", PAYSTACK_SECRET_KEY)
-    .update(rawBodyBuffer)
-    .digest("hex");
-
-  return hash === signature;
-}
-
 async function recordPaystackEventOnce({ eventId, reference, eventType, payload, signature }) {
   const r = await dbQuery(
     `
@@ -516,7 +495,6 @@ async function recordPaystackEventOnce({ eventId, reference, eventType, payload,
     `,
     [String(eventId), String(reference), String(eventType), payload || {}, signature ? String(signature) : null]
   );
-
   return r.rows.length > 0;
 }
 
@@ -529,18 +507,15 @@ app.post(
     try {
       const sig = String(req.headers["x-paystack-signature"] || "");
 
-      // If signature fails, return 200 so Paystack won't retry forever
       if (!paystackSignatureValid(req.body, sig)) {
         logWarn("security.paystack_webhook_bad_sig", { rid: req.rid || "-", ip });
         return res.status(200).json({ received: true, ignored: true });
       }
 
-      // Parse event from raw
       const bodyString = req.body.toString("utf8");
       let event = null;
-      try {
-        event = JSON.parse(bodyString);
-      } catch {
+      try { event = JSON.parse(bodyString); }
+      catch {
         logWarn("paystack.webhook_bad_json", { rid: req.rid || "-", ip });
         return res.status(200).json({ received: true, ignored: true });
       }
@@ -548,7 +523,6 @@ app.post(
       const evtType = String(event?.event || "");
       const data = event?.data || {};
 
-      // Only process successful charges
       if (evtType !== "charge.success") {
         logInfo("paystack.webhook_ignored", { rid: req.rid || "-", ip, evtType });
         return res.status(200).json({ received: true, ignored: true });
@@ -560,7 +534,6 @@ app.post(
         return res.status(200).json({ received: true, ignored: true });
       }
 
-      // Replay protection key
       const eventId =
         String(event?.id || data?.id || data?.transaction || "").trim() ||
         `no_event_id:${reference}:${evtType}`;
@@ -578,7 +551,6 @@ app.post(
         return res.status(200).json({ received: true, ignored: true, replay: true });
       }
 
-      // Strong truth: verify server-to-server
       const verify = await verifyPaystack(reference);
       const ok = Boolean(verify?.status) && verify?.data?.status === "success";
       if (!ok) {
@@ -589,7 +561,6 @@ app.post(
       const paidKobo = Number(verify?.data?.amount || 0);
       const paidNaira = Math.round(paidKobo / 100);
 
-      // Update/create order (idempotent by reference)
       const existing = await dbQuery(`SELECT * FROM orders WHERE reference = $1 LIMIT 1`, [reference]);
 
       if (!existing.rows.length) {
@@ -624,16 +595,12 @@ app.post(
       payload.amountPaid = payload.amountPaid || paidNaira;
       payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
 
-      await dbQuery(
-        `UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1`,
-        [reference, payload]
-      );
+      await dbQuery(`UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1`, [reference, payload]);
 
       logInfo("paystack.webhook_marked_paid", { rid: req.rid || "-", ip, reference, paidNaira });
       return res.status(200).json({ ok: true });
     } catch (e) {
       logError("paystack.webhook_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      // Return 200 to stop Paystack retry storms
       return res.status(200).json({ received: true, ignored: true });
     }
   }
@@ -679,7 +646,7 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024 }
 });
 
-/* ===================== ADMIN AUTH (TOKEN) ===================== */
+/* ===================== ADMIN SESSION (COOKIE + CSRF) ===================== */
 function base64url(input) {
   return Buffer.from(input).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
@@ -699,7 +666,6 @@ function verifyToken(token) {
   if (!token || typeof token !== "string") return null;
   const parts = token.split(".");
   if (parts.length !== 2) return null;
-
   const [payloadB64, sig] = parts;
   if (sig !== sign(payloadB64)) return null;
 
@@ -709,9 +675,23 @@ function verifyToken(token) {
     return payload;
   } catch { return null; }
 }
+
+// ✅ In-memory allowlist (optional, but good)
+const adminJtiMap = new Map(); // jti -> expMs
+function cleanupJti() {
+  const now = Date.now();
+  for (const [jti, exp] of adminJtiMap.entries()) {
+    if (!exp || now > exp) adminJtiMap.delete(jti);
+  }
+}
+setInterval(cleanupJti, 60 * 1000).unref?.();
+
+function getAdminTokenFromCookie(req) {
+  return String(req.cookies?.[COOKIE_NAME] || "");
+}
+
 function requireAdmin(req, res, next) {
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const token = getAdminTokenFromCookie(req);
   const payload = verifyToken(token);
 
   if (!payload || payload.role !== "admin") {
@@ -719,7 +699,32 @@ function requireAdmin(req, res, next) {
     logWarn("security.admin_unauthorized", { rid: req.rid || "-", ip, path: req.originalUrl });
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
+
+  // if using allowlist
+  if (payload.jti && adminJtiMap.size > 0) {
+    const exp = adminJtiMap.get(payload.jti);
+    if (!exp || Date.now() > exp) {
+      return res.status(401).json({ success: false, message: "Session expired" });
+    }
+  }
+
   req.admin = payload;
+  next();
+}
+
+// ✅ CSRF: Double-submit (cookie + header)
+function requireCsrf(req, res, next) {
+  const method = String(req.method || "").toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+
+  const cookieVal = String(req.cookies?.[CSRF_COOKIE] || "");
+  const headerVal = String(req.headers["x-csrf-token"] || req.headers["x-csrf-token".toLowerCase()] || "");
+
+  if (!cookieVal || !headerVal || cookieVal !== headerVal) {
+    const ip = getClientIp(req);
+    logWarn("security.csrf_block", { rid: req.rid || "-", ip, path: req.originalUrl });
+    return res.status(403).json({ success: false, message: "CSRF blocked" });
+  }
   next();
 }
 
@@ -750,10 +755,14 @@ const SeedPricingSchema = z.object({ fee: z.coerce.number().min(0).optional() })
 const ContactSchema = z.object({
   name: zNonEmpty("Name is required").max(120, "Name too long"),
   email: zEmail,
-  message: zNonEmpty("Message is required").max(5000, "Message too long")
+  message: zNonEmpty("Message is required").max(5000, "Message too long"),
+  captchaToken: z.string().optional()
 });
 
-const NewsletterSchema = z.object({ email: zEmail });
+const NewsletterSchema = z.object({
+  email: zEmail,
+  captchaToken: z.string().optional()
+});
 
 const IdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
 
@@ -796,26 +805,23 @@ const OrdersSchema = z.object({
   }
 
   const computedSubtotal = (data.cart || []).reduce((sum, it) => sum + (Number(it.price || 0) * Number(it.qty || 0)), 0);
-  const diff = Math.abs(Number(data.subtotal || 0) - computedSubtotal);
-  if (diff > 2) ctx.addIssue({ code: "custom", path: ["subtotal"], message: "Subtotal mismatch" });
+  if (Math.abs(Number(data.subtotal || 0) - computedSubtotal) > 2) {
+    ctx.addIssue({ code: "custom", path: ["subtotal"], message: "Subtotal mismatch" });
+  }
 
   const computedTotal = computedSubtotal + Number(data.deliveryFee || 0);
-  const diffTotal = Math.abs(Number(data.total || 0) - computedTotal);
-  if (diffTotal > 2) ctx.addIssue({ code: "custom", path: ["total"], message: "Total mismatch" });
+  if (Math.abs(Number(data.total || 0) - computedTotal) > 2) {
+    ctx.addIssue({ code: "custom", path: ["total"], message: "Total mismatch" });
+  }
 });
 
 const VerifyPaystackSchema = z.object({
   reference: zNonEmpty("Missing reference").max(200),
-  expectedAmount: z.coerce.number().min(0).optional() // in naira
+  expectedAmount: z.coerce.number().min(0).optional()
 });
 
 /* ===================== HEALTH ===================== */
 app.get("/health", (req, res) => res.json({ ok: true, uptime: process.uptime() }));
-
-app.get("/health/log-test", (req, res) => {
-  logInfo("health.log_test", { rid: req.rid || "-", ip: getClientIp(req), method: req.method, path: req.originalUrl });
-  res.json({ ok: true, message: "log-test emitted (check Render logs)", rid: req.rid || "-" });
-});
 
 app.get("/db-test", async (req, res) => {
   try {
@@ -826,7 +832,11 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
-/* ===================== ADMIN LOGIN (bcrypt + optional 2FA) ===================== */
+/* ===================== ADMIN LOGIN (COOKIE SESSION + CSRF) ===================== */
+function randomToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString("hex");
+}
+
 app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, res) => {
   try {
     const ip = getClientIp(req);
@@ -850,18 +860,38 @@ app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, re
       return res.status(500).json({ success: false, message: "2FA enabled but not configured in code (install speakeasy and uncomment)." });
     }
 
-    const token = createToken({
-      role: "admin",
-      iat: Date.now(),
-      exp: Date.now() + 1000 * 60 * 60 * 12
-    });
+    // Create session token (signed)
+    const exp = Date.now() + 1000 * 60 * 60 * 12; // 12h
+    const jti = randomToken(16);
+    const token = createToken({ role: "admin", iat: Date.now(), exp, jti });
+
+    // Allowlist it (optional but good)
+    adminJtiMap.set(jti, exp);
+
+    // CSRF token (double submit)
+    const csrfToken = randomToken(20);
+
+    // Set cookies
+    res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
+    res.cookie(CSRF_COOKIE, csrfToken, { ...CSRF_COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
 
     logInfo("security.admin_login_ok", { rid: req.rid || "-", ip });
-    res.json({ success: true, token });
+
+    // Return CSRF token too (helps frontend store it)
+    res.json({ success: true, csrfToken });
   } catch (e) {
     logError("admin.login_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
     res.status(500).json({ success: false, message: "Server error" });
   }
+});
+
+app.post("/admin/logout", requireAdmin, requireCsrf, (req, res) => {
+  const payload = req.admin || {};
+  if (payload?.jti) adminJtiMap.delete(payload.jti);
+
+  res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTS });
+  res.clearCookie(CSRF_COOKIE, { ...CSRF_COOKIE_OPTS });
+  res.json({ success: true });
 });
 
 app.get("/admin/me", requireAdmin, (req, res) => {
@@ -869,6 +899,56 @@ app.get("/admin/me", requireAdmin, (req, res) => {
 });
 
 /* ===================== DELIVERY PRICING (POSTGRES) ===================== */
+function buildDefaultNigeriaPricing(fee = 5000) {
+  const FEE = Math.max(0, Math.round(Number(fee) || 0));
+  const statesAndCapitals = [
+    { name: "Abia", city: "Umuahia" },
+    { name: "Adamawa", city: "Yola" },
+    { name: "Akwa Ibom", city: "Uyo" },
+    { name: "Anambra", city: "Awka" },
+    { name: "Bauchi", city: "Bauchi" },
+    { name: "Bayelsa", city: "Yenagoa" },
+    { name: "Benue", city: "Makurdi" },
+    { name: "Borno", city: "Maiduguri" },
+    { name: "Cross River", city: "Calabar" },
+    { name: "Delta", city: "Asaba" },
+    { name: "Ebonyi", city: "Abakaliki" },
+    { name: "Edo", city: "Benin City" },
+    { name: "Ekiti", city: "Ado-Ekiti" },
+    { name: "Enugu", city: "Enugu" },
+    { name: "FCT", city: "Abuja" },
+    { name: "Gombe", city: "Gombe" },
+    { name: "Imo", city: "Owerri" },
+    { name: "Jigawa", city: "Dutse" },
+    { name: "Kaduna", city: "Kaduna" },
+    { name: "Kano", city: "Kano" },
+    { name: "Katsina", city: "Katsina" },
+    { name: "Kebbi", city: "Birnin Kebbi" },
+    { name: "Kogi", city: "Lokoja" },
+    { name: "Kwara", city: "Ilorin" },
+    { name: "Lagos", city: "Ikeja" },
+    { name: "Nasarawa", city: "Lafia" },
+    { name: "Niger", city: "Minna" },
+    { name: "Ogun", city: "Abeokuta" },
+    { name: "Ondo", city: "Akure" },
+    { name: "Osun", city: "Osogbo" },
+    { name: "Oyo", city: "Ibadan" },
+    { name: "Plateau", city: "Jos" },
+    { name: "Rivers", city: "Port Harcourt" },
+    { name: "Sokoto", city: "Sokoto" },
+    { name: "Taraba", city: "Jalingo" },
+    { name: "Yobe", city: "Damaturu" },
+    { name: "Zamfara", city: "Gusau" }
+  ];
+  return {
+    defaultFee: FEE,
+    updatedAt: new Date().toISOString(),
+    states: statesAndCapitals
+      .map(s => ({ name: s.name, cities: [{ name: s.city, fee: FEE }] }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  };
+}
+
 function sanitizePricing(input) {
   const out = { defaultFee: 5000, updatedAt: new Date().toISOString(), states: [] };
   const def = Number(input?.defaultFee);
@@ -933,7 +1013,7 @@ app.get("/admin/delivery-pricing", requireAdmin, async (req, res) => {
   }
 });
 
-app.put("/admin/delivery-pricing", writeLimiter, requireAdmin, validate(DeliveryPricingSchema), async (req, res) => {
+app.put("/admin/delivery-pricing", writeLimiter, requireAdmin, requireCsrf, validate(DeliveryPricingSchema), async (req, res) => {
   try {
     const cleaned = sanitizePricing(req.body);
     cleaned.updatedAt = new Date().toISOString();
@@ -950,7 +1030,7 @@ app.put("/admin/delivery-pricing", writeLimiter, requireAdmin, validate(Delivery
   }
 });
 
-app.post("/admin/delivery-pricing/seed", writeLimiter, requireAdmin, validate(SeedPricingSchema), async (req, res) => {
+app.post("/admin/delivery-pricing/seed", writeLimiter, requireAdmin, requireCsrf, validate(SeedPricingSchema), async (req, res) => {
   try {
     const fee = Number(req.body?.fee);
     const seedFee = Number.isFinite(fee) && fee >= 0 ? Math.round(fee) : 5000;
@@ -986,17 +1066,14 @@ async function insertOrderIdempotent(reference, status, payload) {
   return sel.rows[0] || null;
 }
 
-// Create order (Pending)
 app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
   try {
     const payload = req.body;
-
     const reference = String(payload.reference || payload.paystackRef || "").trim();
     if (!reference) return res.status(400).json({ success: false, message: "Missing reference" });
 
     payload.status = "Pending";
     const row = await insertOrderIdempotent(reference, "Pending", payload);
-
     return res.json({ success: true, order: row });
   } catch (err) {
     logError("orders.create_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
@@ -1004,13 +1081,8 @@ app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
   }
 });
 
-// alias
 app.post("/order", (req, res) => { req.url = "/orders"; app._router.handle(req, res); });
 
-/**
- * POST /payments/paystack/verify
- * body: { reference, expectedAmount? }
- */
 app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchema), async (req, res) => {
   try {
     const ip = getClientIp(req);
@@ -1116,6 +1188,7 @@ app.get("/orders", requireAdmin, async (req, res) => {
 app.patch("/orders/:id/status",
   writeLimiter,
   requireAdmin,
+  requireCsrf,
   validate(IdParamSchema, "params"),
   validate(OrderStatusSchema, "body"),
   async (req, res) => {
@@ -1137,7 +1210,7 @@ app.patch("/orders/:id/status",
   }
 );
 
-/* ===================== CONTACT (EMAIL + SAVE) ===================== */
+/* ===================== CONTACT ===================== */
 const GMAIL_USER = process.env.GMAIL_USER || "";
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || "";
 const transporter = (GMAIL_USER && GMAIL_APP_PASS)
@@ -1149,6 +1222,14 @@ const transporter = (GMAIL_USER && GMAIL_APP_PASS)
 
 app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res) => {
   try {
+    const ip = getClientIp(req);
+
+    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
+    if (!okCaptcha) {
+      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
+      return res.status(400).json({ success: false, msg: "Captcha failed. Try again." });
+    }
+
     const { name, email, message } = req.body;
 
     await dbQuery(
@@ -1174,9 +1255,17 @@ app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res)
   }
 });
 
-/* ===================== NEWSLETTER (POSTGRES + CONFIRM EMAIL) ===================== */
+/* ===================== NEWSLETTER ===================== */
 app.post("/api/newsletter/subscribe", writeLimiter, validate(NewsletterSchema), async (req, res) => {
   try {
+    const ip = getClientIp(req);
+
+    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
+    if (!okCaptcha) {
+      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
+      return res.status(400).json({ ok: false, message: "Captcha failed. Try again." });
+    }
+
     const emailRaw = req.body.email;
 
     const exists = await dbQuery(`SELECT 1 FROM newsletter_subscribers WHERE email = $1`, [emailRaw]);
@@ -1229,7 +1318,7 @@ If you didn’t subscribe, you can ignore this email.
   }
 });
 
-/* ===================== MESSAGES (ADMIN - POSTGRES) ===================== */
+/* ===================== MESSAGES (ADMIN) ===================== */
 app.get("/admin/messages", requireAdmin, async (req, res) => {
   try {
     const out = await dbQuery(`SELECT * FROM messages ORDER BY created_at DESC`);
@@ -1243,6 +1332,7 @@ app.get("/admin/messages", requireAdmin, async (req, res) => {
 app.delete("/admin/messages/:id",
   writeLimiter,
   requireAdmin,
+  requireCsrf,
   validate(IdParamSchema, "params"),
   async (req, res) => {
     try {
@@ -1302,11 +1392,12 @@ const UpdateProductSchema = z.object({
 app.post("/admin/products",
   writeLimiter,
   requireAdmin,
+  requireCsrf,
   upload.single("image"),
   validate(CreateProductSchema),
   async (req, res) => {
     try {
-      const id = Date.now(); // products table uses your old style; can migrate later
+      const id = Date.now();
       const name = String(req.body.name || "").trim();
       const price = Math.max(0, Math.round(Number(req.body.price || 0)));
       const description = String(req.body.description || "").trim();
@@ -1333,6 +1424,7 @@ app.post("/admin/products",
 app.put("/admin/products/:id",
   writeLimiter,
   requireAdmin,
+  requireCsrf,
   upload.single("image"),
   validate(IdParamSchema, "params"),
   validate(UpdateProductSchema),
@@ -1374,6 +1466,7 @@ app.put("/admin/products/:id",
 app.delete("/admin/products/:id",
   writeLimiter,
   requireAdmin,
+  requireCsrf,
   validate(IdParamSchema, "params"),
   async (req, res) => {
     try {
@@ -1389,57 +1482,6 @@ app.delete("/admin/products/:id",
     }
   }
 );
-
-/* ===================== NIGERIA DEFAULT PRICING (SEED) ===================== */
-function buildDefaultNigeriaPricing(fee = 5000) {
-  const FEE = Math.max(0, Math.round(Number(fee) || 0));
-  const statesAndCapitals = [
-    { name: "Abia", city: "Umuahia" },
-    { name: "Adamawa", city: "Yola" },
-    { name: "Akwa Ibom", city: "Uyo" },
-    { name: "Anambra", city: "Awka" },
-    { name: "Bauchi", city: "Bauchi" },
-    { name: "Bayelsa", city: "Yenagoa" },
-    { name: "Benue", city: "Makurdi" },
-    { name: "Borno", city: "Maiduguri" },
-    { name: "Cross River", city: "Calabar" },
-    { name: "Delta", city: "Asaba" },
-    { name: "Ebonyi", city: "Abakaliki" },
-    { name: "Edo", city: "Benin City" },
-    { name: "Ekiti", city: "Ado-Ekiti" },
-    { name: "Enugu", city: "Enugu" },
-    { name: "FCT", city: "Abuja" },
-    { name: "Gombe", city: "Gombe" },
-    { name: "Imo", city: "Owerri" },
-    { name: "Jigawa", city: "Dutse" },
-    { name: "Kaduna", city: "Kaduna" },
-    { name: "Kano", city: "Kano" },
-    { name: "Katsina", city: "Katsina" },
-    { name: "Kebbi", city: "Birnin Kebbi" },
-    { name: "Kogi", city: "Lokoja" },
-    { name: "Kwara", city: "Ilorin" },
-    { name: "Lagos", city: "Ikeja" },
-    { name: "Nasarawa", city: "Lafia" },
-    { name: "Niger", city: "Minna" },
-    { name: "Ogun", city: "Abeokuta" },
-    { name: "Ondo", city: "Akure" },
-    { name: "Osun", city: "Osogbo" },
-    { name: "Oyo", city: "Ibadan" },
-    { name: "Plateau", city: "Jos" },
-    { name: "Rivers", city: "Port Harcourt" },
-    { name: "Sokoto", city: "Sokoto" },
-    { name: "Taraba", city: "Jalingo" },
-    { name: "Yobe", city: "Damaturu" },
-    { name: "Zamfara", city: "Gusau" }
-  ];
-  return {
-    defaultFee: FEE,
-    updatedAt: new Date().toISOString(),
-    states: statesAndCapitals
-      .map(s => ({ name: s.name, cities: [{ name: s.city, fee: FEE }] }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  };
-}
 
 /* ===================== ERROR HANDLER (SAFE) ===================== */
 app.use((err, req, res, next) => {
