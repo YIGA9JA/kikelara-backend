@@ -30,9 +30,9 @@ const helmet = require("helmet");
 const compression = require("compression");
 const multer = require("multer");
 const { Pool } = require("pg");
-const sharp = require("sharp");
+const sharp = require("sharp"); // (kept because you already use it in project)
 const { z, ZodError } = require("zod");
-const cookieParser = require("cookie-parser"); // ✅ NEW
+const cookieParser = require("cookie-parser");
 
 // ✅ Security middleware
 const rateLimit = require("express-rate-limit");
@@ -76,13 +76,13 @@ const CSRF_COOKIE = "admin_csrf";
 // ⚠️ If frontend and backend are different domains (Vercel + Render), you MUST use SameSite=None; Secure in production.
 const COOKIE_OPTS = {
   httpOnly: true,
-  secure: IS_PROD,               // Secure required when SameSite=None
+  secure: IS_PROD,
   sameSite: IS_PROD ? "none" : "lax",
   path: "/",
 };
 
 const CSRF_COOKIE_OPTS = {
-  httpOnly: false,               // must be readable by browser JS
+  httpOnly: false, // must be readable by browser JS
   secure: IS_PROD,
   sameSite: IS_PROD ? "none" : "lax",
   path: "/",
@@ -439,7 +439,7 @@ const corsOptions = {
   },
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
   allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","x-paystack-signature"],
-  credentials: true, // ✅ IMPORTANT
+  credentials: true,
   optionsSuccessStatus: 204
 };
 app.use(cors(corsOptions));
@@ -614,6 +614,55 @@ app.use(express.urlencoded({ extended: true, limit: "200kb" }));
 app.use(mongoSanitize());
 app.use(xss());
 app.use(hpp());
+
+/* ===================== ✅ PUBLIC ORDER RECEIPT ENDPOINT (NO DB CHANGE) ===================== */
+/**
+ * Used by success page to confirm webhook has marked the order Paid.
+ * Returns only safe fields needed for receipt/invoice.
+ */
+app.get("/orders/public/:reference", async (req, res) => {
+  try {
+    const ref = String(req.params.reference || "").trim();
+    if (!ref) return res.status(400).json({ ok: false, message: "Missing reference" });
+
+    const r = await dbQuery(
+      `SELECT reference, status, payload, created_at FROM orders WHERE reference = $1 LIMIT 1`,
+      [ref]
+    );
+    if (!r.rows.length) return res.status(404).json({ ok: false, message: "Not found" });
+
+    const row = r.rows[0];
+    const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
+
+    const safe = {
+      reference: row.reference,
+      status: String(row.status || payload.status || "Pending"),
+
+      name: payload.name || "",
+      email: payload.email || "",
+      phone: payload.phone || "",
+
+      shippingType: payload.shippingType || "",
+      state: payload.state || "",
+      city: payload.city || "",
+      address: payload.address || "",
+
+      cart: Array.isArray(payload.cart) ? payload.cart : [],
+      subtotal: Number(payload.subtotal || 0),
+      deliveryFee: Number(payload.deliveryFee || 0),
+      total: Number(payload.total || 0),
+
+      createdAt: payload.createdAt || (row.created_at ? new Date(row.created_at).toISOString() : null),
+      paidAt: payload.paidAt || null,
+      amountPaid: payload.amountPaid || null
+    };
+
+    return res.json({ ok: true, order: safe });
+  } catch (e) {
+    logError("orders.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
 
 /* ===================== UPLOADS ===================== */
 const uploadsDir = path.join(__dirname, "uploads");
