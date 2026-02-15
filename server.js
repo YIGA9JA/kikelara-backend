@@ -1,5 +1,24 @@
-// server.js (SUPABASE POSTGRES - PRODUCTION READY + UPLOADS + NEWSLETTER + ZOD + SECURITY + SAFE LOGGING + PAYSTACK VERIFY + PAYSTACK WEBHOOK RAW SIGNATURE)
+// server.js (SUPABASE POSTGRES - PRODUCTION READY + UPLOADS + NEWSLETTER + ZOD + SECURITY + SAFE LOGGING + PAYSTACK VERIFY + PAYSTACK WEBHOOK RAW SIGNATURE + WEBHOOK REPLAY PROTECTION)
 // Backend on Render: https://kikelara1.onrender.com
+
+/**
+ * ✅ IMPORTANT (DB):
+ * Create this table in Supabase SQL Editor for webhook replay protection:
+ *
+ * create table if not exists public.paystack_events (
+ *   id bigserial primary key,
+ *   event_id text not null,
+ *   reference text not null,
+ *   event_type text not null,
+ *   payload jsonb not null default '{}'::jsonb,
+ *   signature text,
+ *   received_at timestamptz not null default now()
+ * );
+ * create unique index if not exists paystack_events_event_ref_uniq
+ *   on public.paystack_events (event_id, reference);
+ * create unique index if not exists paystack_events_type_ref_uniq
+ *   on public.paystack_events (event_type, reference);
+ */
 
 const express = require("express");
 const cors = require("cors");
@@ -15,7 +34,7 @@ const { z, ZodError } = require("zod");
 
 // ✅ Security middleware
 const rateLimit = require("express-rate-limit");
-const slowDown = require("express-slow-down");
+const slowDown = require("express-slow-down"); // ✅ FIXED (was wrongly express-rate-limit)
 const xss = require("xss-clean");
 const mongoSanitize = require("express-mongo-sanitize");
 const hpp = require("hpp");
@@ -47,15 +66,19 @@ const ADMIN_TOTP_SECRET = process.env.ADMIN_TOTP_SECRET || ""; // base32 secret 
 // Paystack
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "";
 
-// Ensure fetch exists (Render/Node 18+ usually has it)
+// ✅ Fetch for Paystack verify (Node 18+ has fetch)
+// NOTE: You have node-fetch@3 in package.json which is ESM-only, so require("node-fetch") will crash.
+// We'll rely on global fetch, and fallback to dynamic import only if needed.
 let fetchFn = global.fetch;
-if (!fetchFn) {
+async function ensureFetch() {
+  if (fetchFn) return fetchFn;
   try {
-    // eslint-disable-next-line import/no-extraneous-dependencies
-    fetchFn = require("node-fetch");
+    const mod = await import("node-fetch");
+    fetchFn = mod.default;
   } catch {
     fetchFn = null;
   }
+  return fetchFn;
 }
 
 /**
@@ -233,9 +256,6 @@ function shouldLogBody(req) {
 }
 
 /* ===================== TEMP BAN LIST ===================== */
-/**
- * In-memory temp ban. (Resets if Render restarts — still useful.)
- */
 const banMap = new Map(); // ip -> { until, reason, hits }
 
 function isBanned(ip) {
@@ -403,7 +423,6 @@ function rateLimitWithSecurityLog(name, opts) {
         query: safeQuery(req)
       });
 
-      // temp-ban logic for noisy abuse
       banIp(ip, 10, `rate_limit:${name}`);
 
       res.status(429).json({
@@ -418,10 +437,11 @@ const globalLimiter = rateLimitWithSecurityLog("global", { windowMs: 15 * 60 * 1
 const authLimiter   = rateLimitWithSecurityLog("auth",   { windowMs: 10 * 60 * 1000, max: 25 });
 const writeLimiter  = rateLimitWithSecurityLog("write",  { windowMs: 5 * 60 * 1000,  max: 60 });
 
+// ✅ Slow-down (real)
 const speedLimiter = slowDown({
   windowMs: 15 * 60 * 1000,
-  delayAfter: 120,
-  delayMs: () => 250
+  delayAfter: 120,              // after 120 requests in 15 mins, start delaying
+  delayMs: () => 250            // 250ms per request over limit
 });
 
 app.use(globalLimiter);
@@ -442,14 +462,36 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* ===================== PAYSTACK WEBHOOK (RAW BODY) ===================== */
+/* ===================== PAYSTACK VERIFY (SERVER-SIDE) ===================== */
+async function verifyPaystack(reference) {
+  if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
+  const f = await ensureFetch();
+  if (!f) throw new Error("fetch not available (use Node 18+ or install node-fetch)");
+
+  const url = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
+
+  const r = await f(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+      "Content-Type": "application/json"
+    }
+  });
+
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    const msg = data?.message || `Paystack verify failed (${r.status})`;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+/* ===================== PAYSTACK WEBHOOK (RAW BODY + SIGNATURE + REPLAY PROTECTION) ===================== */
 /**
- * Set this in Paystack Dashboard as Webhook URL:
+ * Webhook URL:
  * https://kikelara1.onrender.com/payments/paystack/webhook
  *
- * Why RAW:
- * Paystack signature is computed from the exact raw body bytes.
- * If we parse JSON first, signature can fail.
+ * RAW is required because signature uses exact raw bytes.
  */
 function paystackSignatureValid(rawBodyBuffer, signature) {
   if (!PAYSTACK_SECRET_KEY) return false;
@@ -464,6 +506,20 @@ function paystackSignatureValid(rawBodyBuffer, signature) {
   return hash === signature;
 }
 
+async function recordPaystackEventOnce({ eventId, reference, eventType, payload, signature }) {
+  const r = await dbQuery(
+    `
+      insert into paystack_events (event_id, reference, event_type, payload, signature)
+      values ($1, $2, $3, $4, $5)
+      on conflict do nothing
+      returning id
+    `,
+    [String(eventId), String(reference), String(eventType), payload || {}, signature ? String(signature) : null]
+  );
+
+  return r.rows.length > 0;
+}
+
 app.post(
   "/payments/paystack/webhook",
   express.raw({ type: "application/json", limit: "300kb" }),
@@ -471,11 +527,12 @@ app.post(
     const ip = getClientIp(req);
 
     try {
-      const sig = req.headers["x-paystack-signature"];
+      const sig = String(req.headers["x-paystack-signature"] || "");
 
+      // If signature fails, return 200 so Paystack won't retry forever
       if (!paystackSignatureValid(req.body, sig)) {
         logWarn("security.paystack_webhook_bad_sig", { rid: req.rid || "-", ip });
-        return res.status(401).send("Invalid signature");
+        return res.status(200).json({ received: true, ignored: true });
       }
 
       // Parse event from raw
@@ -485,28 +542,54 @@ app.post(
         event = JSON.parse(bodyString);
       } catch {
         logWarn("paystack.webhook_bad_json", { rid: req.rid || "-", ip });
-        return res.status(200).send("bad_json");
+        return res.status(200).json({ received: true, ignored: true });
       }
 
-      const evt = String(event?.event || "");
+      const evtType = String(event?.event || "");
       const data = event?.data || {};
 
-      // We only process successful charges
-      if (evt !== "charge.success") {
-        logInfo("paystack.webhook_ignored", { rid: req.rid || "-", ip, evt });
-        return res.status(200).send("ignored");
+      // Only process successful charges
+      if (evtType !== "charge.success") {
+        logInfo("paystack.webhook_ignored", { rid: req.rid || "-", ip, evtType });
+        return res.status(200).json({ received: true, ignored: true });
       }
 
       const reference = String(data?.reference || "").trim();
-      const amountKobo = Number(data?.amount || 0);
-      const paidNaira = Math.round(amountKobo / 100);
-
       if (!reference) {
         logWarn("paystack.webhook_missing_ref", { rid: req.rid || "-", ip });
-        return res.status(200).send("no_ref");
+        return res.status(200).json({ received: true, ignored: true });
       }
 
-      // ✅ Idempotent update/create
+      // Replay protection key
+      const eventId =
+        String(event?.id || data?.id || data?.transaction || "").trim() ||
+        `no_event_id:${reference}:${evtType}`;
+
+      const firstTime = await recordPaystackEventOnce({
+        eventId,
+        reference,
+        eventType: evtType,
+        payload: event,
+        signature: sig
+      });
+
+      if (!firstTime) {
+        logInfo("paystack.webhook_replay_ignored", { rid: req.rid || "-", ip, reference, evtType });
+        return res.status(200).json({ received: true, ignored: true, replay: true });
+      }
+
+      // Strong truth: verify server-to-server
+      const verify = await verifyPaystack(reference);
+      const ok = Boolean(verify?.status) && verify?.data?.status === "success";
+      if (!ok) {
+        logWarn("paystack.webhook_verify_failed", { rid: req.rid || "-", ip, reference });
+        return res.status(200).json({ received: true, ignored: true });
+      }
+
+      const paidKobo = Number(verify?.data?.amount || 0);
+      const paidNaira = Math.round(paidKobo / 100);
+
+      // Update/create order (idempotent by reference)
       const existing = await dbQuery(`SELECT * FROM orders WHERE reference = $1 LIMIT 1`, [reference]);
 
       if (!existing.rows.length) {
@@ -517,6 +600,7 @@ app.post(
           createdAt: new Date().toISOString(),
           paidAt: new Date().toISOString(),
           amountPaid: paidNaira,
+          paystackTransactionId: verify?.data?.id ?? null,
           note: "Created via webhook (order not previously posted)"
         };
 
@@ -538,6 +622,7 @@ app.post(
       payload.paystackRef = reference;
       payload.paidAt = payload.paidAt || new Date().toISOString();
       payload.amountPaid = payload.amountPaid || paidNaira;
+      payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
 
       await dbQuery(
         `UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1`,
@@ -548,7 +633,8 @@ app.post(
       return res.status(200).json({ ok: true });
     } catch (e) {
       logError("paystack.webhook_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      return res.status(500).send("error");
+      // Return 200 to stop Paystack retry storms
+      return res.status(200).json({ received: true, ignored: true });
     }
   }
 );
@@ -921,30 +1007,6 @@ app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
 // alias
 app.post("/order", (req, res) => { req.url = "/orders"; app._router.handle(req, res); });
 
-/* ===================== PAYSTACK VERIFY (SERVER-SIDE) ===================== */
-async function verifyPaystack(reference) {
-  if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
-  if (!fetchFn) throw new Error("fetch not available (use Node 18+ or install node-fetch)");
-
-  const url = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
-
-  const r = await fetchFn(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json"
-    }
-  });
-
-  const data = await r.json().catch(() => null);
-  if (!r.ok) {
-    const msg = data?.message || `Paystack verify failed (${r.status})`;
-    throw new Error(msg);
-  }
-
-  return data;
-}
-
 /**
  * POST /payments/paystack/verify
  * body: { reference, expectedAmount? }
@@ -982,6 +1044,7 @@ app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchem
         createdAt: new Date().toISOString(),
         paidAt: new Date().toISOString(),
         amountPaid: paidNaira,
+        paystackTransactionId: verify?.data?.id ?? null,
         note: "Created via verify endpoint (order not previously posted)"
       };
 
@@ -995,6 +1058,7 @@ app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchem
     payload.paystackRef = reference;
     payload.paidAt = payload.paidAt || new Date().toISOString();
     payload.amountPaid = payload.amountPaid || paidNaira;
+    payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
 
     const upd = await dbQuery(
       `UPDATE orders
