@@ -1,4 +1,4 @@
-// server.js (SUPABASE POSTGRES - PRODUCTION READY + UPLOADS + NEWSLETTER + ZOD + SECURITY + SAFE LOGGING + PAYSTACK VERIFY + PAYSTACK WEBHOOK RAW SIGNATURE + WEBHOOK REPLAY PROTECTION)
+// server.js (SUPABASE POSTGRES - PRODUCTION READY + SUPABASE STORAGE PRIVATE BUCKET + NEWSLETTER + ZOD + SECURITY + SAFE LOGGING + PAYSTACK VERIFY + PAYSTACK WEBHOOK RAW SIGNATURE + WEBHOOK REPLAY PROTECTION)
 // Backend on Render: https://kikelara1.onrender.com
 
 /**
@@ -33,6 +33,9 @@ const { Pool } = require("pg");
 const sharp = require("sharp");
 const { z, ZodError } = require("zod");
 const cookieParser = require("cookie-parser");
+
+// ✅ Supabase Storage (private bucket)
+const { createClient } = require("@supabase/supabase-js");
 
 // ✅ Security middleware
 const rateLimit = require("express-rate-limit");
@@ -652,28 +655,25 @@ app.get("/orders/public/:reference", async (req, res) => {
   }
 });
 
-/* ===================== UPLOADS (WITH SHARP WEBP) ===================== */
-const uploadsDir = path.join(__dirname, "uploads");
-try { fs.mkdirSync(uploadsDir, { recursive: true }); } catch {}
+/* ===================== SUPABASE STORAGE (PRIVATE BUCKET) ===================== */
+/**
+ * Bucket: private "kikelara"
+ * We store the STORAGE KEY (e.g. "products/123/xxx.webp") in products.image_url
+ * Then we return a SIGNED URL to browser on fetch.
+ */
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
+const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)); // 7 days default
 
-function staticSafeHeaders(res) {
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Cache-Control", "public, max-age=86400");
+const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : null;
+
+function ensureSupabaseReady() {
+  if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+  if (!SUPABASE_BUCKET) throw new Error("SUPABASE_BUCKET missing");
 }
-
-app.use("/uploads", express.static(uploadsDir, { setHeaders: staticSafeHeaders }));
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname || "");
-    const safeBase = path
-      .basename(file.originalname || "file", ext)
-      .replace(/[^a-z0-9_-]/gi, "_")
-      .slice(0, 40);
-    cb(null, `${Date.now()}_${safeBase}${ext || ".jpg"}`);
-  }
-});
 
 function imageOnly(req, file, cb) {
   const okMime = /^image\//.test(file.mimetype || "");
@@ -682,37 +682,102 @@ function imageOnly(req, file, cb) {
   cb(okMime && okExt ? null : new Error("Only PNG/JPG/JPEG/WEBP images allowed"), okMime && okExt);
 }
 
+// ✅ Use memory storage (no disk)
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter: imageOnly,
   limits: { fileSize: 8 * 1024 * 1024 }
 });
 
-async function toWebpSquare(filepath) {
-  const dir = path.dirname(filepath);
-  const base = path.basename(filepath, path.extname(filepath));
-  const newFilename = `${base}.webp`;
-  const outPath = path.join(dir, newFilename);
+function safeKeyPart(str, max = 40) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^a-z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, max) || "image";
+}
 
-  await sharp(filepath)
+async function toWebpSquareBuffer(buf) {
+  return sharp(buf)
     .rotate()
     .resize(1080, 1080, { fit: "cover" })
     .webp({ quality: 82 })
-    .toFile(outPath);
-
-  try { fs.unlinkSync(filepath); } catch {}
-  return { newPath: outPath, newFilename };
+    .toBuffer();
 }
 
-function safeUnlinkUploadByUrl(imageUrl) {
+async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
+  ensureSupabaseReady();
+
+  const base = safeKeyPart(originalName);
+  const key = `products/${productId}/${Date.now()}_${base}.webp`;
+
+  const webpBuf = await toWebpSquareBuffer(buffer);
+
+  const { error: upErr } = await supabaseAdmin.storage
+    .from(SUPABASE_BUCKET)
+    .upload(key, webpBuf, {
+      contentType: "image/webp",
+      cacheControl: "31536000",
+      upsert: false
+    });
+
+  if (upErr) throw new Error(upErr.message || "Supabase upload failed");
+  return { key };
+}
+
+async function signKey(key) {
+  ensureSupabaseReady();
+  const k = String(key || "").trim();
+  if (!k) return "";
+
+  const { data, error } = await supabaseAdmin.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
+
+  if (error) throw new Error(error.message || "Signing failed");
+  return data?.signedUrl || "";
+}
+
+async function deleteSupabaseKey(key) {
   try {
-    if (!imageUrl) return;
-    const u = String(imageUrl);
-    if (!u.startsWith("/uploads/")) return;
-    const filename = u.replace("/uploads/", "");
-    const full = path.join(uploadsDir, filename);
-    if (full.startsWith(uploadsDir) && fs.existsSync(full)) fs.unlinkSync(full);
+    ensureSupabaseReady();
+    const k = String(key || "").trim();
+    if (!k) return;
+    await supabaseAdmin.storage.from(SUPABASE_BUCKET).remove([k]);
   } catch {}
+}
+
+function extractImageKey(row) {
+  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
+  const k1 = String(payload.__image_key || "").trim();
+  if (k1) return k1;
+
+  const img = String(row?.image_url || "").trim();
+  if (!img) return "";
+
+  // legacy external url or legacy /uploads path (leave)
+  if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return "";
+
+  // likely already a key
+  return img;
+}
+
+async function withSignedImage(row) {
+  const r = { ...row };
+  const img = String(row?.image_url || "").trim();
+  if (!img) return r;
+
+  // legacy external url or legacy /uploads path
+  if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return r;
+
+  // treat as storage key
+  try {
+    r.image_url = await signKey(img);
+  } catch {
+    // keep original key if signing fails (avoid crash)
+  }
+  return r;
 }
 
 /* ===================== ADMIN SESSION (COOKIE + CSRF) ===================== */
@@ -1432,7 +1497,11 @@ app.get("/api/products", async (req, res) => {
       : `SELECT * FROM products WHERE is_active = true ORDER BY created_at DESC`;
 
     const out = await dbQuery(sql);
-    res.json(out.rows);
+
+    // ✅ SIGN private bucket images
+    const rows = await Promise.all(out.rows.map(withSignedImage));
+
+    res.json(rows);
   } catch (e) {
     logError("products.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
     res.json([]);
@@ -1452,7 +1521,8 @@ app.get("/api/products/:id",
       const p = out.rows[0];
       if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
 
-      res.json({ success: true, product: p });
+      const signed = await withSignedImage(p);
+      res.json({ success: true, product: signed });
     } catch (e) {
       logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
       res.status(500).json({ success: false, message: "Server error" });
@@ -1672,7 +1742,8 @@ app.delete("/admin/reviews/:id",
 app.get("/admin/products", requireAdmin, async (req, res) => {
   try {
     const out = await dbQuery(`SELECT * FROM products ORDER BY created_at DESC`);
-    res.json({ success: true, products: out.rows });
+    const rows = await Promise.all(out.rows.map(withSignedImage));
+    res.json({ success: true, products: rows });
   } catch (e) {
     logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
     res.status(500).json({ success: false, products: [] });
@@ -1708,23 +1779,29 @@ app.post("/admin/products",
       const description = String(req.body.description || "").trim();
       const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
 
-      let imageUrl = null;
+      let imageKey = null;
 
-      if (req.file?.path) {
-        const { newFilename } = await toWebpSquare(req.file.path);
-        imageUrl = `/uploads/${newFilename}`;
+      if (req.file?.buffer) {
+        const up = await uploadProductImageToSupabase({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+          productId: id
+        });
+        imageKey = up.key;
       }
 
       const payload = { ...req.body };
+      if (imageKey) payload.__image_key = imageKey;
 
       const out = await dbQuery(
         `INSERT INTO products (id, name, price, description, image_url, images, is_active, created_at, updated_at, payload)
          VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW(),$8)
          RETURNING *`,
-        [id, name, price, description || null, imageUrl, JSON.stringify([]), isActive, payload]
+        [id, name, price, description || null, imageKey, JSON.stringify([]), isActive, payload]
       );
 
-      res.json({ success: true, product: out.rows[0] });
+      const signed = await withSignedImage(out.rows[0]);
+      res.json({ success: true, product: signed });
     } catch (e) {
       logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
       res.status(500).json({ success: false, message: "Create product failed" });
@@ -1757,30 +1834,41 @@ app.put("/admin/products/:id",
 
       const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
 
-      let imageUrl = existing.image_url;
+      const payload = Object.assign({}, existing.payload || {}, req.body || {});
+
+      let imageKey = String(existing.image_url || "").trim();
 
       if (removeImage) {
-        safeUnlinkUploadByUrl(existing.image_url);
-        imageUrl = null;
+        const oldKey = extractImageKey(existing) || imageKey;
+        if (oldKey) await deleteSupabaseKey(oldKey);
+        imageKey = null;
+        delete payload.__image_key;
       }
 
-      if (req.file?.path) {
-        safeUnlinkUploadByUrl(existing.image_url);
-        const { newFilename } = await toWebpSquare(req.file.path);
-        imageUrl = `/uploads/${newFilename}`;
-      }
+      if (req.file?.buffer) {
+        const oldKey = extractImageKey(existing) || imageKey;
+        if (oldKey) await deleteSupabaseKey(oldKey);
 
-      const payload = Object.assign({}, existing.payload || {}, req.body || {});
+        const up = await uploadProductImageToSupabase({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+          productId: id
+        });
+
+        imageKey = up.key;
+        payload.__image_key = imageKey;
+      }
 
       const out = await dbQuery(
         `UPDATE products
          SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
          WHERE id=$7
          RETURNING *`,
-        [name, price, description || null, imageUrl, isActive, payload, id]
+        [name, price, description || null, imageKey, isActive, payload, id]
       );
 
-      res.json({ success: true, product: out.rows[0] });
+      const signed = await withSignedImage(out.rows[0]);
+      res.json({ success: true, product: signed });
     } catch (e) {
       logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
       res.status(500).json({ success: false, message: "Update product failed" });
@@ -1800,7 +1888,8 @@ app.delete("/admin/products/:id",
       const current = await dbQuery(`SELECT * FROM products WHERE id = $1`, [id]);
       if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
 
-      safeUnlinkUploadByUrl(current.rows[0].image_url);
+      const oldKey = extractImageKey(current.rows[0]);
+      if (oldKey) await deleteSupabaseKey(oldKey);
 
       const out = await dbQuery(`DELETE FROM products WHERE id = $1 RETURNING id`, [id]);
       if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });

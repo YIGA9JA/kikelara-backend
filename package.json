@@ -8,6 +8,7 @@
     "dev": "node server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
     "axios": "^1.13.4",
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
