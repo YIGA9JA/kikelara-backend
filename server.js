@@ -30,7 +30,7 @@ const helmet = require("helmet");
 const compression = require("compression");
 const multer = require("multer");
 const { Pool } = require("pg");
-const sharp = require("sharp"); // (kept because you already use it in project)
+const sharp = require("sharp");
 const { z, ZodError } = require("zod");
 const cookieParser = require("cookie-parser");
 
@@ -73,7 +73,8 @@ const IS_PROD = process.env.NODE_ENV === "production";
 const COOKIE_NAME = "admin_session";
 const CSRF_COOKIE = "admin_csrf";
 
-// ⚠️ If frontend and backend are different domains (Vercel + Render), you MUST use SameSite=None; Secure in production.
+// ⚠️ If frontend and backend are different domains (Vercel + Render),
+// you MUST use SameSite=None; Secure in production.
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: IS_PROD,
@@ -142,7 +143,6 @@ async function dbQuery(text, params) {
 }
 
 /* ===================== CORS ===================== */
-// Your frontend domain(s)
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
@@ -366,7 +366,6 @@ const zISODateStr = z.string().refine(v => !Number.isNaN(new Date(v).getTime()),
 /* ===================== SECURITY + MIDDLEWARE ===================== */
 app.set("trust proxy", 1);
 
-/** ✅ Force HTTPS in production */
 app.use((req, res, next) => {
   if (IS_PROD) {
     const proto = req.headers["x-forwarded-proto"];
@@ -391,7 +390,6 @@ app.use((req, res, next) => {
 
 app.use(compression());
 
-/* ✅ Rate limiting + slow down */
 function rateLimitWithSecurityLog(name, opts) {
   return rateLimit({
     ...opts,
@@ -430,7 +428,6 @@ const speedLimiter = slowDown({
 app.use(globalLimiter);
 app.use(speedLimiter);
 
-/* ✅ CORS (MUST allow credentials for cookie auth) */
 const corsOptions = {
   origin: function (origin, cb) {
     if (!origin) return cb(null, true);
@@ -445,7 +442,6 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* ✅ Cookies */
 app.use(cookieParser(ADMIN_SECRET));
 
 /* ===================== PAYSTACK WEBHOOK RAW ROUTE (MUST be BEFORE express.json) ===================== */
@@ -616,10 +612,6 @@ app.use(xss());
 app.use(hpp());
 
 /* ===================== ✅ PUBLIC ORDER RECEIPT ENDPOINT (NO DB CHANGE) ===================== */
-/**
- * Used by success page to confirm webhook has marked the order Paid.
- * Returns only safe fields needed for receipt/invoice.
- */
 app.get("/orders/public/:reference", async (req, res) => {
   try {
     const ref = String(req.params.reference || "").trim();
@@ -637,21 +629,17 @@ app.get("/orders/public/:reference", async (req, res) => {
     const safe = {
       reference: row.reference,
       status: String(row.status || payload.status || "Pending"),
-
       name: payload.name || "",
       email: payload.email || "",
       phone: payload.phone || "",
-
       shippingType: payload.shippingType || "",
       state: payload.state || "",
       city: payload.city || "",
       address: payload.address || "",
-
       cart: Array.isArray(payload.cart) ? payload.cart : [],
       subtotal: Number(payload.subtotal || 0),
       deliveryFee: Number(payload.deliveryFee || 0),
       total: Number(payload.total || 0),
-
       createdAt: payload.createdAt || (row.created_at ? new Date(row.created_at).toISOString() : null),
       paidAt: payload.paidAt || null,
       amountPaid: payload.amountPaid || null
@@ -664,11 +652,16 @@ app.get("/orders/public/:reference", async (req, res) => {
   }
 });
 
-/* ===================== UPLOADS ===================== */
+/* ===================== UPLOADS (WITH SHARP WEBP) ===================== */
 const uploadsDir = path.join(__dirname, "uploads");
 try { fs.mkdirSync(uploadsDir, { recursive: true }); } catch {}
 
-app.use("/uploads", express.static(uploadsDir));
+function staticSafeHeaders(res) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+}
+
+app.use("/uploads", express.static(uploadsDir, { setHeaders: staticSafeHeaders }));
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
@@ -694,6 +687,33 @@ const upload = multer({
   fileFilter: imageOnly,
   limits: { fileSize: 8 * 1024 * 1024 }
 });
+
+async function toWebpSquare(filepath) {
+  const dir = path.dirname(filepath);
+  const base = path.basename(filepath, path.extname(filepath));
+  const newFilename = `${base}.webp`;
+  const outPath = path.join(dir, newFilename);
+
+  await sharp(filepath)
+    .rotate()
+    .resize(1080, 1080, { fit: "cover" })
+    .webp({ quality: 82 })
+    .toFile(outPath);
+
+  try { fs.unlinkSync(filepath); } catch {}
+  return { newPath: outPath, newFilename };
+}
+
+function safeUnlinkUploadByUrl(imageUrl) {
+  try {
+    if (!imageUrl) return;
+    const u = String(imageUrl);
+    if (!u.startsWith("/uploads/")) return;
+    const filename = u.replace("/uploads/", "");
+    const full = path.join(uploadsDir, filename);
+    if (full.startsWith(uploadsDir) && fs.existsSync(full)) fs.unlinkSync(full);
+  } catch {}
+}
 
 /* ===================== ADMIN SESSION (COOKIE + CSRF) ===================== */
 function base64url(input) {
@@ -749,7 +769,6 @@ function requireAdmin(req, res, next) {
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
 
-  // if using allowlist
   if (payload.jti && adminJtiMap.size > 0) {
     const exp = adminJtiMap.get(payload.jti);
     if (!exp || Date.now() > exp) {
@@ -761,7 +780,6 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-// ✅ CSRF: Double-submit (cookie + header)
 function requireCsrf(req, res, next) {
   const method = String(req.method || "").toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
@@ -869,6 +887,20 @@ const VerifyPaystackSchema = z.object({
   expectedAmount: z.coerce.number().min(0).optional()
 });
 
+/* ===================== ✅ REVIEWS SCHEMAS (NEW) ===================== */
+const ReviewCreateSchema = z.object({
+  name: zNonEmpty("Missing name").max(80, "Name too long").default("Anonymous"),
+  title: zNonEmpty("Missing title").min(3, "Title too short").max(60, "Title too long"),
+  text: zNonEmpty("Missing text").min(10, "Text too short").max(500, "Text too long"),
+  rating: z.coerce.number().int().min(1).max(5),
+  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long")
+});
+
+const VoteSchema = z.object({
+  voteType: z.enum(["up", "down"]),
+  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long")
+});
+
 /* ===================== HEALTH ===================== */
 app.get("/health", (req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
@@ -909,24 +941,17 @@ app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, re
       return res.status(500).json({ success: false, message: "2FA enabled but not configured in code (install speakeasy and uncomment)." });
     }
 
-    // Create session token (signed)
     const exp = Date.now() + 1000 * 60 * 60 * 12; // 12h
     const jti = randomToken(16);
     const token = createToken({ role: "admin", iat: Date.now(), exp, jti });
-
-    // Allowlist it (optional but good)
     adminJtiMap.set(jti, exp);
 
-    // CSRF token (double submit)
     const csrfToken = randomToken(20);
 
-    // Set cookies
     res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
     res.cookie(CSRF_COOKIE, csrfToken, { ...CSRF_COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
 
     logInfo("security.admin_login_ok", { rid: req.rid || "-", ip });
-
-    // Return CSRF token too (helps frontend store it)
     res.json({ success: true, csrfToken });
   } catch (e) {
     logError("admin.login_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
@@ -1414,6 +1439,236 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
+/* ===================== ✅ PRODUCT DETAILS (PUBLIC) (NEW) ===================== */
+app.get("/api/products/:id",
+  validate(IdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+
+      const out = await dbQuery(`SELECT * FROM products WHERE id = $1 LIMIT 1`, [id]);
+      if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+      const p = out.rows[0];
+      if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
+
+      res.json({ success: true, product: p });
+    } catch (e) {
+      logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+/* ===================== ✅ REVIEWS (PUBLIC) (NEW) ===================== */
+async function getReviewsWithVotes(productId) {
+  const r = await dbQuery(
+    `
+    SELECT
+      pr.*,
+      COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
+      COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
+    FROM product_reviews pr
+    LEFT JOIN review_votes rv ON rv.review_id = pr.id
+    WHERE pr.product_id = $1
+    GROUP BY pr.id
+    ORDER BY pr.created_at DESC
+    LIMIT 200
+    `,
+    [productId]
+  );
+
+  return r.rows.map(x => ({
+    id: x.id,
+    product_id: x.product_id,
+    name: x.name,
+    title: x.title,
+    text: x.text,
+    rating: x.rating,
+    verified: x.verified,
+    device_id: x.device_id,
+    created_at: x.created_at,
+    votes: { up: x.up_votes, down: x.down_votes }
+  }));
+}
+
+app.get("/api/products/:id/reviews",
+  validate(IdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+
+      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, reviews: [] });
+
+      const reviews = await getReviewsWithVotes(productId);
+      res.json({ ok: true, reviews });
+    } catch (e) {
+      logError("reviews.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, reviews: [] });
+    }
+  }
+);
+
+app.get("/api/products/:id/reviews/summary",
+  validate(IdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+
+      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, summary: { avg: 0, count: 0 } });
+
+      const out = await dbQuery(
+        `SELECT COALESCE(AVG(rating),0)::float AS avg, COUNT(*)::int AS count
+         FROM product_reviews
+         WHERE product_id = $1`,
+        [productId]
+      );
+
+      const row = out.rows[0] || { avg: 0, count: 0 };
+      res.json({ ok: true, summary: { avg: Number(row.avg || 0), count: Number(row.count || 0) } });
+    } catch (e) {
+      logError("reviews.summary_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, summary: { avg: 0, count: 0 } });
+    }
+  }
+);
+
+app.post("/api/products/:id/reviews",
+  writeLimiter,
+  validate(IdParamSchema, "params"),
+  validate(ReviewCreateSchema),
+  async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+
+      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, message: "Product not found" });
+
+      const name = String(req.body.name || "Anonymous").trim() || "Anonymous";
+      const title = String(req.body.title || "").trim().slice(0, 60);
+      const text = String(req.body.text || "").trim().slice(0, 500);
+      const rating = Math.max(1, Math.min(5, Number(req.body.rating || 0)));
+      const deviceId = String(req.body.deviceId || "").trim();
+
+      const ins = await dbQuery(
+        `
+        INSERT INTO product_reviews (product_id, name, title, text, rating, verified, device_id)
+        VALUES ($1,$2,$3,$4,$5,false,$6)
+        ON CONFLICT (product_id, device_id) DO UPDATE
+          SET name=EXCLUDED.name,
+              title=EXCLUDED.title,
+              text=EXCLUDED.text,
+              rating=EXCLUDED.rating
+        RETURNING *
+        `,
+        [productId, name, title, text, rating, deviceId]
+      );
+
+      const row = ins.rows[0];
+      const review = {
+        id: row.id,
+        product_id: row.product_id,
+        name: row.name,
+        title: row.title,
+        text: row.text,
+        rating: row.rating,
+        verified: row.verified,
+        device_id: row.device_id,
+        created_at: row.created_at,
+        votes: { up: 0, down: 0 }
+      };
+
+      res.json({ ok: true, review });
+    } catch (e) {
+      logError("reviews.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, message: "Failed to submit review" });
+    }
+  }
+);
+
+app.post("/api/reviews/:id/vote",
+  writeLimiter,
+  validate(IdParamSchema, "params"),
+  validate(VoteSchema),
+  async (req, res) => {
+    try {
+      const reviewId = Number(req.params.id);
+      const voteType = String(req.body.voteType);
+      const deviceId = String(req.body.deviceId || "").trim();
+
+      const exists = await dbQuery(`SELECT id FROM product_reviews WHERE id=$1 LIMIT 1`, [reviewId]);
+      if (!exists.rows.length) return res.status(404).json({ ok: false, message: "Review not found" });
+
+      await dbQuery(
+        `
+        INSERT INTO review_votes (review_id, device_id, vote_type)
+        VALUES ($1,$2,$3)
+        ON CONFLICT (review_id, device_id) DO UPDATE SET vote_type=EXCLUDED.vote_type
+        `,
+        [reviewId, deviceId, voteType]
+      );
+
+      const r = await dbQuery(
+        `
+        SELECT
+          pr.*,
+          COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
+          COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
+        FROM product_reviews pr
+        LEFT JOIN review_votes rv ON rv.review_id = pr.id
+        WHERE pr.id = $1
+        GROUP BY pr.id
+        LIMIT 1
+        `,
+        [reviewId]
+      );
+
+      const x = r.rows[0];
+      const review = {
+        id: x.id,
+        product_id: x.product_id,
+        name: x.name,
+        title: x.title,
+        text: x.text,
+        rating: x.rating,
+        verified: x.verified,
+        device_id: x.device_id,
+        created_at: x.created_at,
+        votes: { up: x.up_votes, down: x.down_votes }
+      };
+
+      res.json({ ok: true, review });
+    } catch (e) {
+      logError("reviews.vote_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, message: "Vote failed" });
+    }
+  }
+);
+
+/* ===================== ✅ REVIEWS (ADMIN DELETE) (NEW) ===================== */
+app.delete("/admin/reviews/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+
+      const del = await dbQuery(`DELETE FROM product_reviews WHERE id=$1 RETURNING id`, [id]);
+      if (!del.rows.length) return res.status(404).json({ success: false, message: "Review not found" });
+
+      res.json({ success: true });
+    } catch (e) {
+      logError("reviews.admin_delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Delete failed" });
+    }
+  }
+);
+
+/* ===================== PRODUCTS ADMIN ===================== */
 app.get("/admin/products", requireAdmin, async (req, res) => {
   try {
     const out = await dbQuery(`SELECT * FROM products ORDER BY created_at DESC`);
@@ -1435,7 +1690,8 @@ const UpdateProductSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   price: z.coerce.number().min(0).optional(),
   description: z.string().trim().max(5000).optional(),
-  is_active: z.string().optional()
+  is_active: z.string().optional(),
+  remove_image: z.string().optional()
 }).passthrough();
 
 app.post("/admin/products",
@@ -1452,7 +1708,13 @@ app.post("/admin/products",
       const description = String(req.body.description || "").trim();
       const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
 
-      const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
+      let imageUrl = null;
+
+      if (req.file?.path) {
+        const { newFilename } = await toWebpSquare(req.file.path);
+        imageUrl = `/uploads/${newFilename}`;
+      }
+
       const payload = { ...req.body };
 
       const out = await dbQuery(
@@ -1493,7 +1755,21 @@ app.put("/admin/products/:id",
         ? Boolean(existing.is_active)
         : (String(req.body.is_active).toLowerCase() !== "false");
 
-      const imageUrl = req.file ? `/uploads/${req.file.filename}` : existing.image_url;
+      const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
+
+      let imageUrl = existing.image_url;
+
+      if (removeImage) {
+        safeUnlinkUploadByUrl(existing.image_url);
+        imageUrl = null;
+      }
+
+      if (req.file?.path) {
+        safeUnlinkUploadByUrl(existing.image_url);
+        const { newFilename } = await toWebpSquare(req.file.path);
+        imageUrl = `/uploads/${newFilename}`;
+      }
+
       const payload = Object.assign({}, existing.payload || {}, req.body || {});
 
       const out = await dbQuery(
@@ -1521,6 +1797,11 @@ app.delete("/admin/products/:id",
     try {
       const id = Number(req.params.id);
 
+      const current = await dbQuery(`SELECT * FROM products WHERE id = $1`, [id]);
+      if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+      safeUnlinkUploadByUrl(current.rows[0].image_url);
+
       const out = await dbQuery(`DELETE FROM products WHERE id = $1 RETURNING id`, [id]);
       if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
 
@@ -1543,7 +1824,6 @@ app.use((err, req, res, next) => {
     path: req?.originalUrl,
     message: msg.slice(0, 800)
   });
-
   if (msg.startsWith("Not allowed by CORS")) {
     return res.status(403).json({ success: false, message: "CORS blocked" });
   }
