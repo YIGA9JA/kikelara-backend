@@ -431,6 +431,7 @@ const speedLimiter = slowDown({
 app.use(globalLimiter);
 app.use(speedLimiter);
 
+// ✅ CORS (FIXED: allow Accept header so preflight passes and edit/delete/upload work)
 const corsOptions = {
   origin: function (origin, cb) {
     if (!origin) return cb(null, true);
@@ -438,9 +439,16 @@ const corsOptions = {
     return cb(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","x-paystack-signature"],
+  allowedHeaders: [
+    "Content-Type",
+    "Accept",
+    "X-CSRF-Token",
+    "x-csrf-token",
+    "x-paystack-signature"
+  ],
   credentials: true,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  maxAge: 86400
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
@@ -706,6 +714,7 @@ async function toWebpSquareBuffer(buf) {
     .toBuffer();
 }
 
+// ✅ Improved error visibility (shows bucket/key + real Supabase message)
 async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
   ensureSupabaseReady();
 
@@ -722,7 +731,12 @@ async function uploadProductImageToSupabase({ buffer, originalName, productId })
       upsert: false
     });
 
-  if (upErr) throw new Error(upErr.message || "Supabase upload failed");
+  if (upErr) {
+    throw new Error(
+      `Supabase upload failed (bucket=${SUPABASE_BUCKET}, key=${key}): ${upErr.message || "unknown error"}`
+    );
+  }
+
   return { key };
 }
 
@@ -850,7 +864,7 @@ function requireCsrf(req, res, next) {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
 
   const cookieVal = String(req.cookies?.[CSRF_COOKIE] || "");
-  const headerVal = String(req.headers["x-csrf-token"] || req.headers["x-csrf-token".toLowerCase()] || "");
+  const headerVal = String(req.headers["x-csrf-token"] || "");
 
   if (!cookieVal || !headerVal || cookieVal !== headerVal) {
     const ip = getClientIp(req);
@@ -1508,7 +1522,7 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-/* ===================== ✅ PRODUCT DETAILS (PUBLIC) (NEW) ===================== */
+/* ===================== ✅ PRODUCT DETAILS (PUBLIC) ===================== */
 app.get("/api/products/:id",
   validate(IdParamSchema, "params"),
   async (req, res) => {
@@ -1530,7 +1544,7 @@ app.get("/api/products/:id",
   }
 );
 
-/* ===================== ✅ REVIEWS (PUBLIC) (NEW) ===================== */
+/* ===================== ✅ REVIEWS (PUBLIC) ===================== */
 async function getReviewsWithVotes(productId) {
   const r = await dbQuery(
     `
@@ -1717,7 +1731,7 @@ app.post("/api/reviews/:id/vote",
   }
 );
 
-/* ===================== ✅ REVIEWS (ADMIN DELETE) (NEW) ===================== */
+/* ===================== ✅ REVIEWS (ADMIN DELETE) ===================== */
 app.delete("/admin/reviews/:id",
   writeLimiter,
   requireAdmin,
@@ -1782,12 +1796,26 @@ app.post("/admin/products",
       let imageKey = null;
 
       if (req.file?.buffer) {
+        logInfo("products.image_received", {
+          rid: req.rid || "-",
+          productId: id,
+          bytes: req.file.size,
+          mimetype: req.file.mimetype,
+          name: req.file.originalname
+        });
+
         const up = await uploadProductImageToSupabase({
           buffer: req.file.buffer,
           originalName: req.file.originalname,
           productId: id
         });
         imageKey = up.key;
+
+        logInfo("products.image_uploaded", {
+          rid: req.rid || "-",
+          productId: id,
+          key: imageKey
+        });
       }
 
       const payload = { ...req.body };
@@ -1803,8 +1831,12 @@ app.post("/admin/products",
       const signed = await withSignedImage(out.rows[0]);
       res.json({ success: true, product: signed });
     } catch (e) {
-      logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Create product failed" });
+      logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      const msg = String(e?.message || e);
+      res.status(500).json({
+        success: false,
+        message: IS_PROD ? "Create product failed" : `Create product failed: ${msg}`
+      });
     }
   }
 );
@@ -1846,6 +1878,14 @@ app.put("/admin/products/:id",
       }
 
       if (req.file?.buffer) {
+        logInfo("products.image_received", {
+          rid: req.rid || "-",
+          productId: id,
+          bytes: req.file.size,
+          mimetype: req.file.mimetype,
+          name: req.file.originalname
+        });
+
         const oldKey = extractImageKey(existing) || imageKey;
         if (oldKey) await deleteSupabaseKey(oldKey);
 
@@ -1857,6 +1897,12 @@ app.put("/admin/products/:id",
 
         imageKey = up.key;
         payload.__image_key = imageKey;
+
+        logInfo("products.image_uploaded", {
+          rid: req.rid || "-",
+          productId: id,
+          key: imageKey
+        });
       }
 
       const out = await dbQuery(
@@ -1870,8 +1916,12 @@ app.put("/admin/products/:id",
       const signed = await withSignedImage(out.rows[0]);
       res.json({ success: true, product: signed });
     } catch (e) {
-      logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Update product failed" });
+      logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      const msg = String(e?.message || e);
+      res.status(500).json({
+        success: false,
+        message: IS_PROD ? "Update product failed" : `Update product failed: ${msg}`
+      });
     }
   }
 );
@@ -1913,6 +1963,7 @@ app.use((err, req, res, next) => {
     path: req?.originalUrl,
     message: msg.slice(0, 800)
   });
+
   if (msg.startsWith("Not allowed by CORS")) {
     return res.status(403).json({ success: false, message: "CORS blocked" });
   }
