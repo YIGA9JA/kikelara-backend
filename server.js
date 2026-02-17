@@ -1,24 +1,32 @@
-// server.js (SUPABASE POSTGRES - PRODUCTION READY + SUPABASE STORAGE PRIVATE BUCKET + NEWSLETTER + ZOD + SECURITY + SAFE LOGGING + PAYSTACK VERIFY + PAYSTACK WEBHOOK RAW SIGNATURE + WEBHOOK REPLAY PROTECTION)
+// server.js (FULL — FIXED + HARDENED)
+// ✅ Fixes your 500 on /admin/products create by:
+//   - NOT using Date.now() as product id when your DB expects serial/int
+//   - Detecting table columns (payload/images) safely
+//   - Falling back cleanly if columns don’t exist
+//   - Handling Supabase storage upload errors with clear logs
+//
 // Backend on Render: https://kikelara1.onrender.com
-
-/**
- * ✅ IMPORTANT (DB):
- * Create this table in Supabase SQL Editor for webhook replay protection:
- *
- * create table if not exists public.paystack_events (
- *   id bigserial primary key,
- *   event_id text not null,
- *   reference text not null,
- *   event_type text not null,
- *   payload jsonb not null default '{}'::jsonb,
- *   signature text,
- *   received_at timestamptz not null default now()
- * );
- * create unique index if not exists paystack_events_event_ref_uniq
- *   on public.paystack_events (event_id, reference);
- * create unique index if not exists paystack_events_type_ref_uniq
- *   on public.paystack_events (event_type, reference);
- */
+//
+// IMPORTANT (Supabase DATABASE_URL on Render):
+// ✅ Use **Session pooler** connection string if Render is IPv4-only.
+// Put it in Render env as DATABASE_URL.
+//
+// ✅ IMPORTANT (DB):
+// Create this table in Supabase SQL Editor for webhook replay protection:
+//
+// create table if not exists public.paystack_events (
+//   id bigserial primary key,
+//   event_id text not null,
+//   reference text not null,
+//   event_type text not null,
+//   payload jsonb not null default '{}'::jsonb,
+//   signature text,
+//   received_at timestamptz not null default now()
+// );
+// create unique index if not exists paystack_events_event_ref_uniq
+//   on public.paystack_events (event_id, reference);
+// create unique index if not exists paystack_events_type_ref_uniq
+//   on public.paystack_events (event_type, reference);
 
 const express = require("express");
 const cors = require("cors");
@@ -50,7 +58,9 @@ const bcrypt = require("bcryptjs");
 // OPTIONAL 2FA (only if installed + you set ADMIN_TOTP_SECRET)
 // const speakeasy = require("speakeasy");
 
-try { require("dotenv").config(); } catch {}
+try {
+  require("dotenv").config();
+} catch {}
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -107,7 +117,8 @@ async function ensureFetch() {
 
 /* ===================== CAPTCHA (HCAPTCHA) ===================== */
 const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY || "";
-const CAPTCHA_REQUIRED = String(process.env.CAPTCHA_REQUIRED || "true").toLowerCase() !== "false";
+const CAPTCHA_REQUIRED =
+  String(process.env.CAPTCHA_REQUIRED || "true").toLowerCase() !== "false";
 
 async function verifyHCaptchaToken(token, ip) {
   if (!CAPTCHA_REQUIRED) return true;
@@ -125,7 +136,7 @@ async function verifyHCaptchaToken(token, ip) {
   const r = await f("https://hcaptcha.com/siteverify", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form.toString()
+    body: form.toString(),
   });
 
   const data = await r.json().catch(() => null);
@@ -136,7 +147,8 @@ async function verifyHCaptchaToken(token, ip) {
 const pool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: IS_PROD ? { rejectUnauthorized: false } : false
+      ssl: IS_PROD ? { rejectUnauthorized: false } : false,
+      // keep defaults unless you need to tune
     })
   : null;
 
@@ -145,7 +157,6 @@ async function dbQuery(text, params) {
   return pool.query(text, params);
 }
 
-// ✅ For transactions (create/update product with image)
 async function withDbClient(fn) {
   if (!pool) throw new Error("DATABASE_URL not set");
   const client = await pool.connect();
@@ -156,10 +167,83 @@ async function withDbClient(fn) {
   }
 }
 
+/* ===================== DB CAPABILITIES (detect columns safely) ===================== */
+const DB_CAPS = {
+  products: { columns: new Set(), idType: "", idHasDefault: false },
+  messages: { columns: new Set(), idType: "", idHasDefault: false },
+  newsletter_subscribers: { columns: new Set(), idType: "", idHasDefault: false },
+  product_reviews: { exists: true },
+  review_votes: { exists: true },
+};
+
+async function loadTableCaps(tableName) {
+  const r = await dbQuery(
+    `
+    SELECT column_name, data_type, column_default
+    FROM information_schema.columns
+    WHERE table_schema='public' AND table_name=$1
+    `,
+    [tableName]
+  );
+  const cols = new Set(r.rows.map((x) => x.column_name));
+  let idType = "";
+  let idHasDefault = false;
+
+  for (const row of r.rows) {
+    if (row.column_name === "id") {
+      idType = String(row.data_type || "");
+      idHasDefault = String(row.column_default || "").includes("nextval");
+    }
+  }
+
+  return { columns: cols, idType, idHasDefault };
+}
+
+async function tableExists(tableName) {
+  const r = await dbQuery(
+    `SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1 LIMIT 1`,
+    [tableName]
+  );
+  return r.rows.length > 0;
+}
+
+async function initDbCaps() {
+  if (!pool) return;
+
+  try {
+    if (await tableExists("products")) {
+      DB_CAPS.products = await loadTableCaps("products");
+    }
+  } catch {}
+
+  try {
+    if (await tableExists("messages")) {
+      DB_CAPS.messages = await loadTableCaps("messages");
+    }
+  } catch {}
+
+  try {
+    if (await tableExists("newsletter_subscribers")) {
+      DB_CAPS.newsletter_subscribers = await loadTableCaps("newsletter_subscribers");
+    }
+  } catch {}
+
+  try {
+    DB_CAPS.product_reviews.exists = await tableExists("product_reviews");
+  } catch {
+    DB_CAPS.product_reviews.exists = false;
+  }
+  try {
+    DB_CAPS.review_votes.exists = await tableExists("review_votes");
+  } catch {
+    DB_CAPS.review_votes.exists = false;
+  }
+}
+
 /* ===================== CORS ===================== */
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 const ALLOW_ORIGINS = [
@@ -169,11 +253,13 @@ const ALLOW_ORIGINS = [
   "http://localhost:5500",
   "https://kikelara1.vercel.app",
   "https://www.kikelara1.vercel.app",
-  ...FRONTEND_ORIGINS
+  ...FRONTEND_ORIGINS,
 ];
 
 /* ===================== LOGGING (JSON + SECURITY LOGS) ===================== */
-function nowIso() { return new Date().toISOString(); }
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function log(level, event, payload = {}) {
   const line = { ts: nowIso(), level, service: SERVICE_NAME, env: ENV, event, ...payload };
@@ -193,13 +279,29 @@ function getClientIp(req) {
 }
 
 const SENSITIVE_KEYWORDS = [
-  "authorization","cookie","set-cookie","token","access_token","refresh_token",
-  "password","pass","secret","api_key","apikey","key","pin","code","otp","paystack","card","cvv"
+  "authorization",
+  "cookie",
+  "set-cookie",
+  "token",
+  "access_token",
+  "refresh_token",
+  "password",
+  "pass",
+  "secret",
+  "api_key",
+  "apikey",
+  "key",
+  "pin",
+  "code",
+  "otp",
+  "paystack",
+  "card",
+  "cvv",
 ];
 
 function isSensitiveKey(k) {
   const key = String(k || "").toLowerCase();
-  return SENSITIVE_KEYWORDS.some(s => key.includes(s));
+  return SENSITIVE_KEYWORDS.some((s) => key.includes(s));
 }
 
 function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
@@ -215,7 +317,7 @@ function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
       seen.add(x);
 
       if (Array.isArray(x)) {
-        const arr = x.slice(0, maxArray).map(v => walk(v, d - 1));
+        const arr = x.slice(0, maxArray).map((v) => walk(v, d - 1));
         return x.length > maxArray ? [...arr, `…(+${x.length - maxArray} more)`] : arr;
       }
 
@@ -234,7 +336,6 @@ function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
 function safeHeaders(req) {
   const keep = {};
   const hdrs = req.headers || {};
-
   for (const [k, v] of Object.entries(hdrs)) {
     const lk = k.toLowerCase();
 
@@ -243,14 +344,24 @@ function safeHeaders(req) {
       continue;
     }
 
-    if (["origin","referer","user-agent","content-type","accept","x-forwarded-proto","x-paystack-signature","x-csrf-token"].includes(lk)) {
+    if (
+      [
+        "origin",
+        "referer",
+        "user-agent",
+        "content-type",
+        "accept",
+        "x-forwarded-proto",
+        "x-paystack-signature",
+        "x-csrf-token",
+      ].includes(lk)
+    ) {
       keep[lk] = typeof v === "string" ? (v.length > 300 ? v.slice(0, 300) + "…" : v) : v;
       continue;
     }
 
     if (isSensitiveKey(lk)) keep[lk] = "[REDACTED]";
   }
-
   return keep;
 }
 
@@ -258,7 +369,13 @@ function safeQuery(req) {
   const q = req.query || {};
   const out = {};
   for (const [k, v] of Object.entries(q)) {
-    out[k] = isSensitiveKey(k) ? "[REDACTED]" : (typeof v === "string" ? (v.length > 300 ? v.slice(0, 300) + "…" : v) : v);
+    out[k] = isSensitiveKey(k)
+      ? "[REDACTED]"
+      : typeof v === "string"
+      ? v.length > 300
+        ? v.slice(0, 300) + "…"
+        : v
+      : v;
   }
   return out;
 }
@@ -318,14 +435,21 @@ app.use((req, res, next) => {
     method: req.method,
     path: req.originalUrl,
     headers: safeHeaders(req),
-    query: safeQuery(req)
+    query: safeQuery(req),
   });
 
   res.on("finish", () => {
     const end = process.hrtime.bigint();
     const ms = Number(end - start) / 1e6;
 
-    const payload = { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms) };
+    const payload = {
+      rid,
+      ip,
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      ms: Math.round(ms),
+    };
 
     if (shouldLogBody(req) && req.body && typeof req.body === "object") {
       payload.body = safeClone(req.body, { maxString: 400, maxArray: 25, depth: 2 });
@@ -340,7 +464,15 @@ app.use((req, res, next) => {
     if (!res.writableEnded) {
       const end = process.hrtime.bigint();
       const ms = Number(end - start) / 1e6;
-      logWarn("http.close", { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms), note: "client_aborted" });
+      logWarn("http.close", {
+        rid,
+        ip,
+        method: req.method,
+        path: req.originalUrl,
+        status: res.statusCode,
+        ms: Math.round(ms),
+        note: "client_aborted",
+      });
     }
   });
 
@@ -359,13 +491,13 @@ function validate(schema, where = "body") {
         logWarn("zod.validation", {
           rid: req.rid || "-",
           path: req.originalUrl,
-          issues: err.issues.map(i => ({ path: i.path.join("."), message: i.message }))
+          issues: err.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
         });
 
         return res.status(400).json({
           success: false,
           message: "Validation failed",
-          details: err.issues.map(i => ({ field: i.path.join("."), message: i.message }))
+          details: err.issues.map((i) => ({ field: i.path.join("."), message: i.message })),
         });
       }
       next(err);
@@ -375,7 +507,9 @@ function validate(schema, where = "body") {
 
 const zEmail = z.string().trim().toLowerCase().email("Invalid email");
 const zNonEmpty = (msg) => z.string().trim().min(1, msg);
-const zISODateStr = z.string().refine(v => !Number.isNaN(new Date(v).getTime()), "Invalid date");
+const zISODateStr = z
+  .string()
+  .refine((v) => !Number.isNaN(new Date(v).getTime()), "Invalid date");
 
 /* ===================== SECURITY + MIDDLEWARE ===================== */
 app.set("trust proxy", 1);
@@ -390,10 +524,12 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(helmet({
-  crossOriginResourcePolicy: false,
-  contentSecurityPolicy: false
-}));
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+    contentSecurityPolicy: false,
+  })
+);
 
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -419,39 +555,41 @@ function rateLimitWithSecurityLog(name, opts) {
         method: req.method,
         path: req.originalUrl,
         headers: safeHeaders(req),
-        query: safeQuery(req)
+        query: safeQuery(req),
       });
 
       banIp(ip, 10, `rate_limit:${name}`);
 
       res.status(429).json({ success: false, message: "Too many requests. Please try again later." });
-    }
+    },
   });
 }
 
 const globalLimiter = rateLimitWithSecurityLog("global", { windowMs: 15 * 60 * 1000, max: 500 });
-const authLimiter   = rateLimitWithSecurityLog("auth",   { windowMs: 10 * 60 * 1000, max: 25 });
-const writeLimiter  = rateLimitWithSecurityLog("write",  { windowMs: 5 * 60 * 1000,  max: 60 });
+const authLimiter = rateLimitWithSecurityLog("auth", { windowMs: 10 * 60 * 1000, max: 25 });
+const writeLimiter = rateLimitWithSecurityLog("write", { windowMs: 5 * 60 * 1000, max: 60 });
 
 const speedLimiter = slowDown({
   windowMs: 15 * 60 * 1000,
   delayAfter: 120,
-  delayMs: () => 250
+  delayMs: () => 250,
 });
 
 app.use(globalLimiter);
 app.use(speedLimiter);
 
+// ✅ CORS (fixed; supports credentials properly)
 const corsOptions = {
   origin: function (origin, cb) {
     if (!origin) return cb(null, true);
     if (ALLOW_ORIGINS.includes(origin)) return cb(null, true);
     return cb(new Error("Not allowed by CORS: " + origin));
   },
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","x-paystack-signature"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Accept", "X-CSRF-Token", "x-csrf-token", "x-paystack-signature"],
   credentials: true,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
@@ -483,8 +621,8 @@ async function verifyPaystack(reference) {
     method: "GET",
     headers: {
       Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json"
-    }
+      "Content-Type": "application/json",
+    },
   });
 
   const data = await r.json().catch(() => null);
@@ -524,8 +662,9 @@ app.post(
 
       const bodyString = req.body.toString("utf8");
       let event = null;
-      try { event = JSON.parse(bodyString); }
-      catch {
+      try {
+        event = JSON.parse(bodyString);
+      } catch {
         logWarn("paystack.webhook_bad_json", { rid: req.rid || "-", ip });
         return res.status(200).json({ received: true, ignored: true });
       }
@@ -553,7 +692,7 @@ app.post(
         reference,
         eventType: evtType,
         payload: event,
-        signature: sig
+        signature: sig,
       });
 
       if (!firstTime) {
@@ -582,7 +721,7 @@ app.post(
           paidAt: new Date().toISOString(),
           amountPaid: paidNaira,
           paystackTransactionId: verify?.data?.id ?? null,
-          note: "Created via webhook (order not previously posted)"
+          note: "Created via webhook (order not previously posted)",
         };
 
         await dbQuery(
@@ -631,10 +770,9 @@ app.get("/orders/public/:reference", async (req, res) => {
     const ref = String(req.params.reference || "").trim();
     if (!ref) return res.status(400).json({ ok: false, message: "Missing reference" });
 
-    const r = await dbQuery(
-      `SELECT reference, status, payload, created_at FROM orders WHERE reference = $1 LIMIT 1`,
-      [ref]
-    );
+    const r = await dbQuery(`SELECT reference, status, payload, created_at FROM orders WHERE reference=$1 LIMIT 1`, [
+      ref,
+    ]);
     if (!r.rows.length) return res.status(404).json({ ok: false, message: "Not found" });
 
     const row = r.rows[0];
@@ -656,7 +794,7 @@ app.get("/orders/public/:reference", async (req, res) => {
       total: Number(payload.total || 0),
       createdAt: payload.createdAt || (row.created_at ? new Date(row.created_at).toISOString() : null),
       paidAt: payload.paidAt || null,
-      amountPaid: payload.amountPaid || null
+      amountPaid: payload.amountPaid || null,
     };
 
     return res.json({ ok: true, order: safe });
@@ -668,18 +806,19 @@ app.get("/orders/public/:reference", async (req, res) => {
 
 /* ===================== SUPABASE STORAGE (PRIVATE BUCKET) ===================== */
 /**
- * Bucket: private "kikelara"
- * We store the STORAGE KEY (e.g. "products/123/xxx.webp") in products.image_url
- * Then we return a SIGNED URL to browser on fetch.
+ * Bucket: private "kikelara" (default)
+ * Store KEY (e.g. "products/123/xxx.webp") in products.image_url
+ * Return SIGNED URL to browser on fetch.
  */
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
 const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)); // 7 days default
 
-const supabaseAdmin = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-  : null;
+const supabaseAdmin =
+  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+    : null;
 
 function ensureSupabaseReady() {
   if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
@@ -697,24 +836,22 @@ function imageOnly(req, file, cb) {
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: imageOnly,
-  limits: { fileSize: 8 * 1024 * 1024 }
+  limits: { fileSize: 8 * 1024 * 1024 },
 });
 
 function safeKeyPart(str, max = 40) {
-  return String(str || "")
-    .toLowerCase()
-    .replace(/\.[^.]+$/, "")
-    .replace(/[^a-z0-9_-]/g, "_")
-    .replace(/_+/g, "_")
-    .slice(0, max) || "image";
+  return (
+    String(str || "")
+      .toLowerCase()
+      .replace(/\.[^.]+$/, "")
+      .replace(/[^a-z0-9_-]/g, "_")
+      .replace(/_+/g, "_")
+      .slice(0, max) || "image"
+  );
 }
 
 async function toWebpSquareBuffer(buf) {
-  return sharp(buf)
-    .rotate()
-    .resize(1080, 1080, { fit: "cover" })
-    .webp({ quality: 82 })
-    .toBuffer();
+  return sharp(buf).rotate().resize(1080, 1080, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
 }
 
 async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
@@ -725,15 +862,16 @@ async function uploadProductImageToSupabase({ buffer, originalName, productId })
 
   const webpBuf = await toWebpSquareBuffer(buffer);
 
-  const { error: upErr } = await supabaseAdmin.storage
-    .from(SUPABASE_BUCKET)
-    .upload(key, webpBuf, {
-      contentType: "image/webp",
-      cacheControl: "31536000",
-      upsert: false
-    });
+  const { error: upErr } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, webpBuf, {
+    contentType: "image/webp",
+    cacheControl: "31536000",
+    upsert: false,
+  });
 
-  if (upErr) throw new Error(upErr.message || "Supabase upload failed");
+  if (upErr) {
+    throw new Error(`Supabase upload failed (bucket=${SUPABASE_BUCKET}, key=${key}): ${upErr.message || "unknown error"}`);
+  }
+
   return { key };
 }
 
@@ -742,9 +880,7 @@ async function signKey(key) {
   const k = String(key || "").trim();
   if (!k) return "";
 
-  const { data, error } = await supabaseAdmin.storage
-    .from(SUPABASE_BUCKET)
-    .createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
+  const { data, error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
 
   if (error) throw new Error(error.message || "Signing failed");
   return data?.signedUrl || "";
@@ -767,11 +903,8 @@ function extractImageKey(row) {
   const img = String(row?.image_url || "").trim();
   if (!img) return "";
 
-  // legacy external url or legacy /uploads path (leave)
   if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return "";
-
-  // likely already a key
-  return img;
+  return img; // treat as key
 }
 
 async function withSignedImage(row) {
@@ -779,14 +912,12 @@ async function withSignedImage(row) {
   const img = String(row?.image_url || "").trim();
   if (!img) return r;
 
-  // legacy external url or legacy /uploads path
   if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return r;
 
-  // treat as storage key
   try {
     r.image_url = await signKey(img);
   } catch {
-    // keep original key if signing fails (avoid crash)
+    // keep key if signing fails
   }
   return r;
 }
@@ -800,8 +931,13 @@ function unbase64url(input) {
   return Buffer.from(b64, "base64").toString("utf-8");
 }
 function sign(payloadB64) {
-  return crypto.createHmac("sha256", ADMIN_SECRET).update(payloadB64).digest("base64")
-    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return crypto
+    .createHmac("sha256", ADMIN_SECRET)
+    .update(payloadB64)
+    .digest("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }
 function createToken(payloadObj) {
   const payloadB64 = base64url(JSON.stringify(payloadObj));
@@ -818,10 +954,12 @@ function verifyToken(token) {
     const payload = JSON.parse(unbase64url(payloadB64));
     if (payload?.exp && Date.now() > payload.exp) return null;
     return payload;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
-// ✅ In-memory allowlist (optional, but good)
+// ✅ In-memory allowlist
 const adminJtiMap = new Map(); // jti -> expMs
 function cleanupJti() {
   const now = Date.now();
@@ -861,7 +999,7 @@ function requireCsrf(req, res, next) {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
 
   const cookieVal = String(req.cookies?.[CSRF_COOKIE] || "");
-  const headerVal = String(req.headers["x-csrf-token"] || req.headers["x-csrf-token".toLowerCase()] || "");
+  const headerVal = String(req.headers["x-csrf-token"] || "");
 
   if (!cookieVal || !headerVal || cookieVal !== headerVal) {
     const ip = getClientIp(req);
@@ -874,23 +1012,29 @@ function requireCsrf(req, res, next) {
 /* ===================== ZOD SCHEMAS ===================== */
 const AdminLoginSchema = z.object({
   password: zNonEmpty("Missing password"),
-  otp: z.string().trim().optional()
+  otp: z.string().trim().optional(),
 });
 
 const DeliveryPricingSchema = z.object({
   defaultFee: z.coerce.number().min(0).optional(),
   updatedAt: z.string().optional(),
-  states: z.array(
-    z.object({
-      name: z.string().trim().min(1),
-      cities: z.array(
-        z.object({
-          name: z.string().trim().min(1),
-          fee: z.coerce.number().min(0)
-        })
-      ).optional().default([])
-    })
-  ).optional().default([])
+  states: z
+    .array(
+      z.object({
+        name: z.string().trim().min(1),
+        cities: z
+          .array(
+            z.object({
+              name: z.string().trim().min(1),
+              fee: z.coerce.number().min(0),
+            })
+          )
+          .optional()
+          .default([]),
+      })
+    )
+    .optional()
+    .default([]),
 });
 
 const SeedPricingSchema = z.object({ fee: z.coerce.number().min(0).optional() });
@@ -899,70 +1043,92 @@ const ContactSchema = z.object({
   name: zNonEmpty("Name is required").max(120, "Name too long"),
   email: zEmail,
   message: zNonEmpty("Message is required").max(5000, "Message too long"),
-  captchaToken: z.string().optional()
+  captchaToken: z.string().optional(),
 });
 
 const NewsletterSchema = z.object({
   email: zEmail,
-  captchaToken: z.string().optional()
+  captchaToken: z.string().optional(),
 });
 
 const IdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
 
 const OrderStatusSchema = z.object({ status: zNonEmpty("Missing status").max(40, "Status too long") });
 
-const CartItemSchema = z.object({
-  id: z.union([z.string(), z.number()]).optional(),
-  name: zNonEmpty("Item name required").max(250),
-  price: z.coerce.number().min(0),
-  qty: z.coerce.number().int().min(1),
-  image: z.string().optional().nullable(),
-  total: z.coerce.number().min(0).optional()
-}).passthrough();
+const CartItemSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]).optional(),
+    name: zNonEmpty("Item name required").max(250),
+    price: z.coerce.number().min(0),
+    qty: z.coerce.number().int().min(1),
+    image: z.string().optional().nullable(),
+    total: z.coerce.number().min(0).optional(),
+  })
+  .passthrough();
 
-const zISO = zISODateStr;
+const OrdersSchema = z
+  .object({
+    reference: zNonEmpty("Missing reference").max(200),
+    name: zNonEmpty("Missing name").max(120),
+    email: zEmail,
+    phone: zNonEmpty("Missing phone").max(30),
+    shippingType: z.enum(["pickup", "delivery"]),
+    state: z.string().optional().default(""),
+    city: z.string().optional().default(""),
+    address: z.string().optional().default(""),
+    cart: z.array(CartItemSchema).min(1, "Cart is empty"),
+    subtotal: z.coerce.number().min(0),
+    deliveryFee: z.coerce.number().min(0),
+    total: z.coerce.number().min(0),
 
-const OrdersSchema = z.object({
-  reference: zNonEmpty("Missing reference").max(200),
-  name: zNonEmpty("Missing name").max(120),
-  email: zEmail,
-  phone: zNonEmpty("Missing phone").max(30),
-  shippingType: z.enum(["pickup", "delivery"]),
-  state: z.string().optional().default(""),
-  city: z.string().optional().default(""),
-  address: z.string().optional().default(""),
-  cart: z.array(CartItemSchema).min(1, "Cart is empty"),
-  subtotal: z.coerce.number().min(0),
-  deliveryFee: z.coerce.number().min(0),
-  total: z.coerce.number().min(0),
+    status: z.string().optional().default("Pending"),
+    paystackRef: z.string().optional().default(""),
+    createdAt: zISODateStr,
 
-  status: z.string().optional().default("Pending"),
-  paystackRef: z.string().optional().default(""),
-  createdAt: zISO,
+    paidAt: z.string().optional(),
+    amountPaid: z.coerce.number().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.shippingType === "delivery") {
+      if (!String(data.state || "").trim())
+        ctx.addIssue({ code: "custom", path: ["state"], message: "State is required for delivery" });
+      if (!String(data.city || "").trim())
+        ctx.addIssue({ code: "custom", path: ["city"], message: "City/LGA is required for delivery" });
+      if (!String(data.address || "").trim())
+        ctx.addIssue({ code: "custom", path: ["address"], message: "Address is required for delivery" });
+    }
 
-  paidAt: z.string().optional(),
-  amountPaid: z.coerce.number().optional()
-}).superRefine((data, ctx) => {
-  if (data.shippingType === "delivery") {
-    if (!String(data.state || "").trim()) ctx.addIssue({ code: "custom", path: ["state"], message: "State is required for delivery" });
-    if (!String(data.city || "").trim()) ctx.addIssue({ code: "custom", path: ["city"], message: "City/LGA is required for delivery" });
-    if (!String(data.address || "").trim()) ctx.addIssue({ code: "custom", path: ["address"], message: "Address is required for delivery" });
-  }
+    const computedSubtotal = (data.cart || []).reduce(
+      (sum, it) => sum + Number(it.price || 0) * Number(it.qty || 0),
+      0
+    );
+    if (Math.abs(Number(data.subtotal || 0) - computedSubtotal) > 2) {
+      ctx.addIssue({ code: "custom", path: ["subtotal"], message: "Subtotal mismatch" });
+    }
 
-  const computedSubtotal = (data.cart || []).reduce((sum, it) => sum + (Number(it.price || 0) * Number(it.qty || 0)), 0);
-  if (Math.abs(Number(data.subtotal || 0) - computedSubtotal) > 2) {
-    ctx.addIssue({ code: "custom", path: ["subtotal"], message: "Subtotal mismatch" });
-  }
-
-  const computedTotal = computedSubtotal + Number(data.deliveryFee || 0);
-  if (Math.abs(Number(data.total || 0) - computedTotal) > 2) {
-    ctx.addIssue({ code: "custom", path: ["total"], message: "Total mismatch" });
-  }
-});
+    const computedTotal = computedSubtotal + Number(data.deliveryFee || 0);
+    if (Math.abs(Number(data.total || 0) - computedTotal) > 2) {
+      ctx.addIssue({ code: "custom", path: ["total"], message: "Total mismatch" });
+    }
+  });
 
 const VerifyPaystackSchema = z.object({
   reference: zNonEmpty("Missing reference").max(200),
-  expectedAmount: z.coerce.number().min(0).optional()
+  expectedAmount: z.coerce.number().min(0).optional(),
+});
+
+/* ===================== ✅ REVIEWS SCHEMAS ===================== */
+const ReviewCreateSchema = z.object({
+  name: zNonEmpty("Missing name").max(80, "Name too long").default("Anonymous"),
+  title: zNonEmpty("Missing title").min(3, "Title too short").max(60, "Title too long"),
+  text: zNonEmpty("Missing text").min(10, "Text too short").max(500, "Text too long"),
+  rating: z.coerce.number().int().min(1).max(5),
+  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long"),
+});
+
+const VoteSchema = z.object({
+  voteType: z.enum(["up", "down"]),
+  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long"),
 });
 
 /* ===================== HEALTH ===================== */
@@ -1002,7 +1168,9 @@ app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, re
 
     if (ADMIN_TOTP_SECRET) {
       if (!otp) return res.status(401).json({ success: false, message: "OTP required" });
-      return res.status(500).json({ success: false, message: "2FA enabled but not configured in code (install speakeasy and uncomment)." });
+      return res
+        .status(500)
+        .json({ success: false, message: "2FA enabled but not configured in code (install speakeasy and uncomment)." });
     }
 
     const exp = Date.now() + 1000 * 60 * 60 * 12; // 12h
@@ -1036,23 +1204,748 @@ app.get("/admin/me", requireAdmin, (req, res) => {
   res.json({ success: true, admin: req.admin });
 });
 
-/* ===================== PRODUCTS (POSTGRES) ===================== */
+/* ===================== DELIVERY PRICING (POSTGRES) ===================== */
+function buildDefaultNigeriaPricing(fee = 5000) {
+  const FEE = Math.max(0, Math.round(Number(fee) || 0));
+  const statesAndCapitals = [
+    { name: "Abia", city: "Umuahia" },
+    { name: "Adamawa", city: "Yola" },
+    { name: "Akwa Ibom", city: "Uyo" },
+    { name: "Anambra", city: "Awka" },
+    { name: "Bauchi", city: "Bauchi" },
+    { name: "Bayelsa", city: "Yenagoa" },
+    { name: "Benue", city: "Makurdi" },
+    { name: "Borno", city: "Maiduguri" },
+    { name: "Cross River", city: "Calabar" },
+    { name: "Delta", city: "Asaba" },
+    { name: "Ebonyi", city: "Abakaliki" },
+    { name: "Edo", city: "Benin City" },
+    { name: "Ekiti", city: "Ado-Ekiti" },
+    { name: "Enugu", city: "Enugu" },
+    { name: "FCT", city: "Abuja" },
+    { name: "Gombe", city: "Gombe" },
+    { name: "Imo", city: "Owerri" },
+    { name: "Jigawa", city: "Dutse" },
+    { name: "Kaduna", city: "Kaduna" },
+    { name: "Kano", city: "Kano" },
+    { name: "Katsina", city: "Katsina" },
+    { name: "Kebbi", city: "Birnin Kebbi" },
+    { name: "Kogi", city: "Lokoja" },
+    { name: "Kwara", city: "Ilorin" },
+    { name: "Lagos", city: "Ikeja" },
+    { name: "Nasarawa", city: "Lafia" },
+    { name: "Niger", city: "Minna" },
+    { name: "Ogun", city: "Abeokuta" },
+    { name: "Ondo", city: "Akure" },
+    { name: "Osun", city: "Osogbo" },
+    { name: "Oyo", city: "Ibadan" },
+    { name: "Plateau", city: "Jos" },
+    { name: "Rivers", city: "Port Harcourt" },
+    { name: "Sokoto", city: "Sokoto" },
+    { name: "Taraba", city: "Jalingo" },
+    { name: "Yobe", city: "Damaturu" },
+    { name: "Zamfara", city: "Gusau" },
+  ];
+  return {
+    defaultFee: FEE,
+    updatedAt: new Date().toISOString(),
+    states: statesAndCapitals
+      .map((s) => ({ name: s.name, cities: [{ name: s.city, fee: FEE }] }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function sanitizePricing(input) {
+  const out = { defaultFee: 5000, updatedAt: new Date().toISOString(), states: [] };
+  const def = Number(input?.defaultFee);
+  out.defaultFee = Number.isFinite(def) && def >= 0 ? Math.round(def) : 5000;
+
+  const states = Array.isArray(input?.states) ? input.states : [];
+  out.states = states
+    .map((s) => {
+      const name = String(s?.name || "").trim();
+      const citiesIn = Array.isArray(s?.cities) ? s.cities : [];
+      const cities = citiesIn
+        .map((c) => ({
+          name: String(c?.name || "").trim(),
+          fee: Math.round(Number(c?.fee)),
+        }))
+        .filter((c) => c.name && Number.isFinite(c.fee) && c.fee >= 0);
+      return { name, cities };
+    })
+    .filter((s) => s.name);
+
+  out.states.sort((a, b) => a.name.localeCompare(b.name));
+  out.states.forEach((s) => s.cities.sort((a, b) => a.name.localeCompare(b.name)));
+  return out;
+}
+
+async function getPricing() {
+  const r = await dbQuery(`SELECT default_fee, updated_at, data FROM delivery_pricing WHERE id = 1`);
+  if (!r.rows.length) {
+    const seeded = buildDefaultNigeriaPricing(5000);
+    await dbQuery(`INSERT INTO delivery_pricing (id, default_fee, updated_at, data) VALUES (1, $1, NOW(), $2)`, [
+      seeded.defaultFee,
+      seeded,
+    ]);
+    return seeded;
+  }
+  const row = r.rows[0];
+  const obj = row.data && typeof row.data === "object" ? row.data : {};
+  return {
+    defaultFee: Number(row.default_fee) || 5000,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
+    states: Array.isArray(obj.states) ? obj.states : [],
+  };
+}
+
+app.get("/delivery-pricing", async (req, res) => {
+  try {
+    const pricing = await getPricing();
+    res.json(pricing);
+  } catch (e) {
+    logError("pricing.get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json(buildDefaultNigeriaPricing(5000));
+  }
+});
+
+app.get("/admin/delivery-pricing", requireAdmin, async (req, res) => {
+  try {
+    const pricing = await getPricing();
+    res.json({ success: true, pricing });
+  } catch (e) {
+    logError("pricing.admin_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ success: false, pricing: buildDefaultNigeriaPricing(5000) });
+  }
+});
+
+app.put(
+  "/admin/delivery-pricing",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(DeliveryPricingSchema),
+  async (req, res) => {
+    try {
+      const cleaned = sanitizePricing(req.body);
+      cleaned.updatedAt = new Date().toISOString();
+
+      await dbQuery(`UPDATE delivery_pricing SET default_fee=$1, updated_at=NOW(), data=$2 WHERE id=1`, [
+        cleaned.defaultFee,
+        cleaned,
+      ]);
+
+      res.json({ success: true, pricing: cleaned });
+    } catch (e) {
+      logError("pricing.admin_put_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Failed to update pricing" });
+    }
+  }
+);
+
+app.post(
+  "/admin/delivery-pricing/seed",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(SeedPricingSchema),
+  async (req, res) => {
+    try {
+      const fee = Number(req.body?.fee);
+      const seedFee = Number.isFinite(fee) && fee >= 0 ? Math.round(fee) : 5000;
+
+      const seeded = buildDefaultNigeriaPricing(seedFee);
+      seeded.updatedAt = new Date().toISOString();
+
+      await dbQuery(`UPDATE delivery_pricing SET default_fee=$1, updated_at=NOW(), data=$2 WHERE id=1`, [
+        seeded.defaultFee,
+        seeded,
+      ]);
+
+      res.json({ success: true, pricing: seeded });
+    } catch (e) {
+      logError("pricing.seed_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Failed to seed pricing" });
+    }
+  }
+);
+
+/* ===================== ORDERS (IDEMPOTENT UPSERT) ===================== */
+async function insertOrderIdempotent(reference, status, payload) {
+  const ins = await dbQuery(
+    `INSERT INTO orders (reference, status, payload)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (reference) DO NOTHING
+     RETURNING *`,
+    [reference, status, payload]
+  );
+
+  if (ins.rows.length) return ins.rows[0];
+
+  const sel = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
+  return sel.rows[0] || null;
+}
+
+app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
+  try {
+    const payload = req.body;
+    const reference = String(payload.reference || payload.paystackRef || "").trim();
+    if (!reference) return res.status(400).json({ success: false, message: "Missing reference" });
+
+    payload.status = "Pending";
+    const row = await insertOrderIdempotent(reference, "Pending", payload);
+    return res.json({ success: true, order: row });
+  } catch (err) {
+    logError("orders.create_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
+    res.status(500).json({ success: false, message: "Failed to save order" });
+  }
+});
+
+app.post("/order", (req, res) => {
+  req.url = "/orders";
+  app._router.handle(req, res);
+});
+
+app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchema), async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+    const { reference, expectedAmount } = req.body;
+
+    const verify = await verifyPaystack(reference);
+
+    const ok = Boolean(verify?.status) && verify?.data?.status === "success";
+    if (!ok) {
+      logWarn("security.paystack_verify_failed", { rid: req.rid || "-", ip, reference });
+      return res.status(400).json({ success: false, message: "Payment not verified" });
+    }
+
+    const paidKobo = Number(verify?.data?.amount || 0);
+    const paidNaira = Math.round(paidKobo / 100);
+
+    if (expectedAmount !== undefined && Number.isFinite(Number(expectedAmount))) {
+      const exp = Math.round(Number(expectedAmount));
+      if (Math.abs(exp - paidNaira) > 2) {
+        logWarn("security.paystack_amount_mismatch", { rid: req.rid || "-", ip, reference, expectedAmount: exp, paidNaira });
+        return res.status(400).json({ success: false, message: "Amount mismatch" });
+      }
+    }
+
+    const existing = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
+    if (!existing.rows.length) {
+      const payload = {
+        reference,
+        status: "Paid",
+        paystackRef: reference,
+        createdAt: new Date().toISOString(),
+        paidAt: new Date().toISOString(),
+        amountPaid: paidNaira,
+        paystackTransactionId: verify?.data?.id ?? null,
+        note: "Created via verify endpoint (order not previously posted)",
+      };
+
+      const created = await insertOrderIdempotent(reference, "Paid", payload);
+      return res.json({ success: true, verified: true, order: created });
+    }
+
+    const order = existing.rows[0];
+    const payload = order.payload && typeof order.payload === "object" ? order.payload : {};
+    payload.status = "Paid";
+    payload.paystackRef = reference;
+    payload.paidAt = payload.paidAt || new Date().toISOString();
+    payload.amountPaid = payload.amountPaid || paidNaira;
+    payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
+
+    const upd = await dbQuery(
+      `UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1 RETURNING *`,
+      [reference, payload]
+    );
+
+    logInfo("security.paystack_verified", { rid: req.rid || "-", ip, reference, paidNaira });
+    return res.json({ success: true, verified: true, order: upd.rows[0] });
+  } catch (e) {
+    logError("paystack.verify_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ success: false, message: "Verification failed" });
+  }
+});
+
+/* ===================== ORDERS ADMIN ===================== */
+app.get("/orders", requireAdmin, async (req, res) => {
+  try {
+    const status = String(req.query.status || "").trim();
+    const q = String(req.query.q || "").trim().toLowerCase();
+
+    let sql = `SELECT * FROM orders`;
+    const where = [];
+    const params = [];
+
+    if (status) {
+      params.push(status);
+      where.push(`status=$${params.length}`);
+    }
+
+    if (q) {
+      params.push(`%${q}%`);
+      const p = `$${params.length}`;
+      where.push(`(
+        LOWER(reference) LIKE ${p}
+        OR LOWER(payload->>'name') LIKE ${p}
+        OR LOWER(payload->>'phone') LIKE ${p}
+        OR LOWER(payload->>'email') LIKE ${p}
+      )`);
+    }
+
+    if (where.length) sql += ` WHERE ` + where.join(" AND ");
+    sql += ` ORDER BY created_at DESC`;
+
+    const out = await dbQuery(sql, params);
+    res.json(out.rows);
+  } catch (err) {
+    logError("orders.list_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
+    res.status(500).json([]);
+  }
+});
+
+app.patch(
+  "/orders/:id/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  validate(OrderStatusSchema, "body"),
+  async (req, res) => {
+    try {
+      const orderId = Number(req.params.id);
+      const status = String(req.body.status || "").trim();
+
+      const updated = await dbQuery(`UPDATE orders SET status=$1 WHERE id=$2 RETURNING *`, [status, orderId]);
+
+      if (!updated.rows.length) return res.status(404).json({ success: false, message: "Order not found" });
+      res.json({ success: true, order: updated.rows[0] });
+    } catch (err) {
+      logError("orders.status_patch_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Failed to update status" });
+    }
+  }
+);
+
+/* ===================== CONTACT ===================== */
+const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || "";
+const transporter =
+  GMAIL_USER && GMAIL_APP_PASS
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
+      })
+    : null;
+
+app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+
+    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
+    if (!okCaptcha) {
+      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
+      return res.status(400).json({ success: false, msg: "Captcha failed. Try again." });
+    }
+
+    const { name, email, message } = req.body;
+
+    // safer insert: try without id, fallback with id if needed
+    try {
+      await dbQuery(
+        `INSERT INTO messages (name, email, message, created_at) VALUES ($1,$2,$3,$4)`,
+        [String(name), String(email), String(message), new Date()]
+      );
+    } catch (e) {
+      // fallback if your table requires id
+      const fallbackId = Math.floor(Date.now() / 1000); // safe int
+      await dbQuery(
+        `INSERT INTO messages (id, name, email, message, created_at) VALUES ($1,$2,$3,$4,$5)`,
+        [fallbackId, String(name), String(email), String(message), new Date()]
+      );
+    }
+
+    if (transporter) {
+      await transporter.sendMail({
+        from: GMAIL_USER,
+        replyTo: email,
+        to: GMAIL_USER,
+        subject: `New Contact from ${name}`,
+        text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`,
+      });
+    }
+
+    res.json({ success: true, msg: "Message received — we will reply soon!" });
+  } catch (err) {
+    logError("contact.failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
+    res.status(500).json({ success: false, msg: "Server error" });
+  }
+});
+
+/* ===================== NEWSLETTER ===================== */
+app.post("/api/newsletter/subscribe", writeLimiter, validate(NewsletterSchema), async (req, res) => {
+  try {
+    const ip = getClientIp(req);
+
+    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
+    if (!okCaptcha) {
+      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
+      return res.status(400).json({ ok: false, message: "Captcha failed. Try again." });
+    }
+
+    const emailRaw = req.body.email;
+
+    const exists = await dbQuery(`SELECT 1 FROM newsletter_subscribers WHERE email=$1`, [emailRaw]);
+    const already = exists.rows.length > 0;
+
+    if (!already) {
+      try {
+        await dbQuery(`INSERT INTO newsletter_subscribers (email, subscribed_at) VALUES ($1,$2)`, [
+          emailRaw,
+          new Date(),
+        ]);
+      } catch (e) {
+        // fallback if your table requires id
+        const fallbackId = Math.floor(Date.now() / 1000);
+        await dbQuery(`INSERT INTO newsletter_subscribers (id, email, subscribed_at) VALUES ($1,$2,$3)`, [
+          fallbackId,
+          emailRaw,
+          new Date(),
+        ]);
+      }
+    }
+
+    if (transporter) {
+      await transporter.sendMail({
+        from: `KÍKÉLÁRÁ <${GMAIL_USER}>`,
+        to: emailRaw,
+        subject: "✅ You’re subscribed — welcome to KÍKÉLÁRÁ",
+        text: `Hi,
+
+Thanks for subscribing to KÍKÉLÁRÁ ✨
+You’ll be first to know about product drops, restocks, and skincare tips.
+
+If you didn’t subscribe, you can ignore this email.
+
+— KÍKÉLÁRÁ Skincare`,
+        html: `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#2b1d12;">
+  <h2 style="margin:0 0 10px;">Welcome to KÍKÉLÁRÁ ✨</h2>
+  <p style="margin:0 0 12px;">Thanks for subscribing. You’ll be first to know about product drops, restocks, and skincare tips.</p>
+  <p style="margin:0 0 12px;"><b>Your email:</b> ${emailRaw}</p>
+  <p style="margin:0;">If you didn’t subscribe, ignore this email.</p>
+  <hr style="border:none;border-top:1px solid #e8d7c7;margin:16px 0;">
+  <p style="margin:0;font-size:12px;opacity:.75;">© ${new Date().getFullYear()} KÍKÉLÁRÁ Skincare</p>
+</div>`,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      already,
+      message: transporter
+        ? already
+          ? "Already subscribed — confirmation sent."
+          : "Subscribed — confirmation sent."
+        : already
+        ? "Already subscribed."
+        : "Subscribed.",
+    });
+  } catch (err) {
+    logError("newsletter.failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
+    return res.status(500).json({ ok: false, message: "Server error" });
+  }
+});
+
+/* ===================== MESSAGES (ADMIN) ===================== */
+app.get("/admin/messages", requireAdmin, async (req, res) => {
+  try {
+    const out = await dbQuery(`SELECT * FROM messages ORDER BY created_at DESC`);
+    res.json(out.rows);
+  } catch (e) {
+    logError("messages.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.json([]);
+  }
+});
+
+app.delete(
+  "/admin/messages/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+
+      const out = await dbQuery(`DELETE FROM messages WHERE id=$1 RETURNING id`, [id]);
+      if (!out.rows.length) return res.status(404).json({ success: false, message: "Message not found" });
+
+      res.json({ success: true });
+    } catch (e) {
+      logError("messages.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Delete failed" });
+    }
+  }
+);
+
+/* ===================== PRODUCTS (PUBLIC) ===================== */
 app.get("/api/products", async (req, res) => {
   try {
     const includeAll = String(req.query.all || "").toLowerCase() === "true";
     const sql = includeAll
       ? `SELECT * FROM products ORDER BY created_at DESC`
-      : `SELECT * FROM products WHERE is_active = true ORDER BY created_at DESC`;
+      : `SELECT * FROM products WHERE is_active=true ORDER BY created_at DESC`;
 
     const out = await dbQuery(sql);
-
-    // ✅ SIGN private bucket images
     const rows = await Promise.all(out.rows.map(withSignedImage));
-
     res.json(rows);
   } catch (e) {
     logError("products.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
     res.json([]);
+  }
+});
+
+app.get("/api/products/:id", validate(IdParamSchema, "params"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    const out = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+    if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+    const p = out.rows[0];
+    if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
+
+    const signed = await withSignedImage(p);
+    res.json({ success: true, product: signed });
+  } catch (e) {
+    logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+/* ===================== ✅ REVIEWS (PUBLIC) ===================== */
+async function getReviewsWithVotes(productId) {
+  if (!DB_CAPS.product_reviews.exists) return [];
+
+  // if review_votes missing, just return reviews without vote aggregates
+  if (!DB_CAPS.review_votes.exists) {
+    const r = await dbQuery(
+      `SELECT * FROM product_reviews WHERE product_id=$1 ORDER BY created_at DESC LIMIT 200`,
+      [productId]
+    );
+    return r.rows.map((x) => ({
+      id: x.id,
+      product_id: x.product_id,
+      name: x.name,
+      title: x.title,
+      text: x.text,
+      rating: x.rating,
+      verified: x.verified,
+      device_id: x.device_id,
+      created_at: x.created_at,
+      votes: { up: 0, down: 0 },
+    }));
+  }
+
+  const r = await dbQuery(
+    `
+    SELECT
+      pr.*,
+      COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
+      COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
+    FROM product_reviews pr
+    LEFT JOIN review_votes rv ON rv.review_id = pr.id
+    WHERE pr.product_id = $1
+    GROUP BY pr.id
+    ORDER BY pr.created_at DESC
+    LIMIT 200
+    `,
+    [productId]
+  );
+
+  return r.rows.map((x) => ({
+    id: x.id,
+    product_id: x.product_id,
+    name: x.name,
+    title: x.title,
+    text: x.text,
+    rating: x.rating,
+    verified: x.verified,
+    device_id: x.device_id,
+    created_at: x.created_at,
+    votes: { up: x.up_votes, down: x.down_votes },
+  }));
+}
+
+app.get("/api/products/:id/reviews", validate(IdParamSchema, "params"), async (req, res) => {
+  try {
+    const productId = Number(req.params.id);
+
+    const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+    if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, reviews: [] });
+
+    const reviews = await getReviewsWithVotes(productId);
+    res.json({ ok: true, reviews });
+  } catch (e) {
+    logError("reviews.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ ok: false, reviews: [] });
+  }
+});
+
+app.get("/api/products/:id/reviews/summary", validate(IdParamSchema, "params"), async (req, res) => {
+  try {
+    const productId = Number(req.params.id);
+
+    const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+    if (!p.rows.length || !p.rows[0].is_active)
+      return res.status(404).json({ ok: false, summary: { avg: 0, count: 0 } });
+
+    if (!DB_CAPS.product_reviews.exists) return res.json({ ok: true, summary: { avg: 0, count: 0 } });
+
+    const out = await dbQuery(
+      `SELECT COALESCE(AVG(rating),0)::float AS avg, COUNT(*)::int AS count
+       FROM product_reviews
+       WHERE product_id=$1`,
+      [productId]
+    );
+
+    const row = out.rows[0] || { avg: 0, count: 0 };
+    res.json({ ok: true, summary: { avg: Number(row.avg || 0), count: Number(row.count || 0) } });
+  } catch (e) {
+    logError("reviews.summary_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ ok: false, summary: { avg: 0, count: 0 } });
+  }
+});
+
+app.post(
+  "/api/products/:id/reviews",
+  writeLimiter,
+  validate(IdParamSchema, "params"),
+  validate(ReviewCreateSchema),
+  async (req, res) => {
+    try {
+      const productId = Number(req.params.id);
+
+      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
+      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, message: "Product not found" });
+
+      if (!DB_CAPS.product_reviews.exists) return res.status(500).json({ ok: false, message: "Reviews not configured" });
+
+      const name = String(req.body.name || "Anonymous").trim() || "Anonymous";
+      const title = String(req.body.title || "").trim().slice(0, 60);
+      const text = String(req.body.text || "").trim().slice(0, 500);
+      const rating = Math.max(1, Math.min(5, Number(req.body.rating || 0)));
+      const deviceId = String(req.body.deviceId || "").trim();
+
+      const ins = await dbQuery(
+        `
+        INSERT INTO product_reviews (product_id, name, title, text, rating, verified, device_id)
+        VALUES ($1,$2,$3,$4,$5,false,$6)
+        ON CONFLICT (product_id, device_id) DO UPDATE
+          SET name=EXCLUDED.name,
+              title=EXCLUDED.title,
+              text=EXCLUDED.text,
+              rating=EXCLUDED.rating
+        RETURNING *
+        `,
+        [productId, name, title, text, rating, deviceId]
+      );
+
+      const row = ins.rows[0];
+      const review = {
+        id: row.id,
+        product_id: row.product_id,
+        name: row.name,
+        title: row.title,
+        text: row.text,
+        rating: row.rating,
+        verified: row.verified,
+        device_id: row.device_id,
+        created_at: row.created_at,
+        votes: { up: 0, down: 0 },
+      };
+
+      res.json({ ok: true, review });
+    } catch (e) {
+      logError("reviews.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, message: "Failed to submit review" });
+    }
+  }
+);
+
+app.post("/api/reviews/:id/vote", writeLimiter, validate(IdParamSchema, "params"), validate(VoteSchema), async (req, res) => {
+  try {
+    const reviewId = Number(req.params.id);
+    const voteType = String(req.body.voteType);
+    const deviceId = String(req.body.deviceId || "").trim();
+
+    if (!DB_CAPS.product_reviews.exists || !DB_CAPS.review_votes.exists) {
+      return res.status(500).json({ ok: false, message: "Voting not configured" });
+    }
+
+    const exists = await dbQuery(`SELECT id FROM product_reviews WHERE id=$1 LIMIT 1`, [reviewId]);
+    if (!exists.rows.length) return res.status(404).json({ ok: false, message: "Review not found" });
+
+    await dbQuery(
+      `
+      INSERT INTO review_votes (review_id, device_id, vote_type)
+      VALUES ($1,$2,$3)
+      ON CONFLICT (review_id, device_id) DO UPDATE SET vote_type=EXCLUDED.vote_type
+      `,
+      [reviewId, deviceId, voteType]
+    );
+
+    const r = await dbQuery(
+      `
+      SELECT
+        pr.*,
+        COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
+        COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
+      FROM product_reviews pr
+      LEFT JOIN review_votes rv ON rv.review_id = pr.id
+      WHERE pr.id = $1
+      GROUP BY pr.id
+      LIMIT 1
+      `,
+      [reviewId]
+    );
+
+    const x = r.rows[0];
+    const review = {
+      id: x.id,
+      product_id: x.product_id,
+      name: x.name,
+      title: x.title,
+      text: x.text,
+      rating: x.rating,
+      verified: x.verified,
+      device_id: x.device_id,
+      created_at: x.created_at,
+      votes: { up: x.up_votes, down: x.down_votes },
+    };
+
+    res.json({ ok: true, review });
+  } catch (e) {
+    logError("reviews.vote_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ ok: false, message: "Vote failed" });
+  }
+});
+
+/* ===================== ✅ REVIEWS (ADMIN DELETE) ===================== */
+app.delete("/admin/reviews/:id", writeLimiter, requireAdmin, requireCsrf, validate(IdParamSchema, "params"), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!DB_CAPS.product_reviews.exists) return res.status(500).json({ success: false, message: "Reviews not configured" });
+
+    const del = await dbQuery(`DELETE FROM product_reviews WHERE id=$1 RETURNING id`, [id]);
+    if (!del.rows.length) return res.status(404).json({ success: false, message: "Review not found" });
+
+    res.json({ success: true });
+  } catch (e) {
+    logError("reviews.admin_delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ success: false, message: "Delete failed" });
   }
 });
 
@@ -1064,111 +1957,233 @@ app.get("/admin/products", requireAdmin, async (req, res) => {
     res.json({ success: true, products: rows });
   } catch (e) {
     logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    // IMPORTANT: return real message for debugging admin
-    res.status(500).json({ success: false, message: String(e?.message || e), products: [] });
+    res.status(500).json({ success: false, products: [] });
   }
 });
 
-const CreateProductSchema = z.object({
-  name: zNonEmpty("Missing name").max(200, "Name too long"),
-  price: z.coerce.number().min(0, "Invalid price").default(0),
-  description: z.string().trim().max(5000, "Description too long").optional().default(""),
-  is_active: z.string().optional()
-}).passthrough();
+const CreateProductSchema = z
+  .object({
+    name: zNonEmpty("Missing name").max(200, "Name too long"),
+    price: z.coerce.number().min(0, "Invalid price").default(0),
+    description: z.string().trim().max(5000, "Description too long").optional().default(""),
+    is_active: z.string().optional(),
+  })
+  .passthrough();
 
-const UpdateProductSchema = z.object({
-  name: z.string().trim().min(1).max(200).optional(),
-  price: z.coerce.number().min(0).optional(),
-  description: z.string().trim().max(5000).optional(),
-  is_active: z.string().optional(),
-  remove_image: z.string().optional()
-}).passthrough();
+const UpdateProductSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    price: z.coerce.number().min(0).optional(),
+    description: z.string().trim().max(5000).optional(),
+    is_active: z.string().optional(),
+    remove_image: z.string().optional(),
+  })
+  .passthrough();
 
-app.post("/admin/products",
+function makeSafeProductId() {
+  // If DB id is integer, Date.now() breaks. Use epoch seconds.
+  const t = DB_CAPS.products?.idType || "";
+  if (t.includes("uuid")) return crypto.randomUUID();
+  if (t.includes("bigint")) return Date.now(); // safe
+  if (t.includes("integer")) return Math.floor(Date.now() / 1000); // safe int
+  // unknown -> safe int
+  return Math.floor(Date.now() / 1000);
+}
+
+function buildProductInsert({ id, name, price, description, imageKey, isActive, payload }) {
+  const cols = [];
+  const vals = [];
+  const params = [];
+
+  const has = (c) => DB_CAPS.products.columns.has(c);
+
+  // id handling:
+  // - if id has default, don't include id
+  // - else include id
+  const includeId = DB_CAPS.products.idHasDefault === false && has("id");
+  if (includeId) {
+    cols.push("id");
+    vals.push(id);
+  }
+
+  if (has("name")) {
+    cols.push("name");
+    vals.push(name);
+  }
+  if (has("price")) {
+    cols.push("price");
+    vals.push(price);
+  }
+  if (has("description")) {
+    cols.push("description");
+    vals.push(description || null);
+  }
+  if (has("image_url")) {
+    cols.push("image_url");
+    vals.push(imageKey || null);
+  }
+  if (has("is_active")) {
+    cols.push("is_active");
+    vals.push(isActive);
+  }
+  if (has("created_at")) {
+    cols.push("created_at");
+    vals.push(new Date());
+  }
+  if (has("updated_at")) {
+    cols.push("updated_at");
+    vals.push(new Date());
+  }
+  if (has("payload")) {
+    cols.push("payload");
+    vals.push(payload || {});
+  }
+  if (has("images")) {
+    cols.push("images");
+    vals.push(JSON.stringify([]));
+  }
+
+  for (let i = 0; i < vals.length; i++) params.push(`$${i + 1}`);
+
+  return {
+    sql: `INSERT INTO products (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`,
+    values: vals,
+  };
+}
+
+app.post(
+  "/admin/products",
   writeLimiter,
   requireAdmin,
   requireCsrf,
   upload.single("image"),
   validate(CreateProductSchema),
   async (req, res) => {
+    let uploadedKey = "";
+
     try {
       const name = String(req.body.name || "").trim();
       const price = Math.max(0, Math.round(Number(req.body.price || 0)));
       const description = String(req.body.description || "").trim();
       const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
 
-      // ✅ Transaction: insert first (DB generates ID), then upload image, then update row
+      // payload optional (only if column exists)
+      const payload = { ...req.body };
+
+      // 1) Create row first
       const createdRow = await withDbClient(async (client) => {
         await client.query("BEGIN");
-        let uploadedKey = "";
-
         try {
-          // Insert WITHOUT forcing id (avoids int overflow / schema mismatch)
-          const payload = { ...req.body };
+          const id = makeSafeProductId();
 
-          const ins = await client.query(
-            `
-            INSERT INTO products (name, price, description, image_url, is_active, created_at, updated_at, payload)
-            VALUES ($1,$2,$3,$4,$5,NOW(),NOW(),$6)
-            RETURNING *
-            `,
-            [name, price, description || null, null, isActive, payload]
-          );
+          const insQ = buildProductInsert({
+            id,
+            name,
+            price,
+            description,
+            imageKey: null,
+            isActive,
+            payload,
+          });
 
-          let row = ins.rows[0];
-
-          // If payload column doesn't exist in your table, fall back gracefully
-          if (!row) {
-            throw new Error("Insert failed (no row returned)");
+          let row;
+          try {
+            const ins = await client.query(insQ.sql, insQ.values);
+            row = ins.rows[0];
+          } catch (e) {
+            // If insert fails because id needed but not included, retry with id included
+            // (rare edge if caps not loaded yet)
+            const fallbackId = makeSafeProductId();
+            const cols = ["id", "name", "price", "description", "image_url", "is_active", "created_at", "updated_at"];
+            const vals = [fallbackId, name, price, description || null, null, isActive, new Date(), new Date()];
+            const params = cols.map((_, i) => `$${i + 1}`);
+            const sql = `INSERT INTO products (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`;
+            const ins2 = await client.query(sql, vals);
+            row = ins2.rows[0];
           }
 
+          if (!row) throw new Error("Insert failed");
+
+          // 2) Upload image (optional)
           if (req.file?.buffer) {
+            if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+
+            logInfo("products.image_received", {
+              rid: req.rid || "-",
+              productId: row.id,
+              bytes: req.file.size,
+              mimetype: req.file.mimetype,
+              name: req.file.originalname,
+            });
+
             const up = await uploadProductImageToSupabase({
               buffer: req.file.buffer,
               originalName: req.file.originalname,
-              productId: row.id
+              productId: row.id,
             });
             uploadedKey = up.key;
 
-            // store key in payload too (safe), but if payload column doesn't exist, update still works
-            const nextPayload = Object.assign({}, (row.payload && typeof row.payload === "object" ? row.payload : {}), payload, { __image_key: uploadedKey });
+            logInfo("products.image_uploaded", {
+              rid: req.rid || "-",
+              productId: row.id,
+              key: uploadedKey,
+            });
 
-            const upd = await client.query(
-              `
-              UPDATE products
-              SET image_url=$1, updated_at=NOW(), payload=$2
-              WHERE id=$3
-              RETURNING *
-              `,
-              [uploadedKey, nextPayload, row.id]
-            );
+            // 3) Update DB row with key (+ payload.__image_key if payload column exists)
+            const hasPayload = DB_CAPS.products.columns.has("payload");
+            const nextPayload = hasPayload
+              ? Object.assign(
+                  {},
+                  row.payload && typeof row.payload === "object" ? row.payload : {},
+                  payload,
+                  { __image_key: uploadedKey }
+                )
+              : null;
 
-            row = upd.rows[0] || row;
+            if (DB_CAPS.products.columns.has("payload")) {
+              const upd = await client.query(
+                `UPDATE products SET image_url=$1, updated_at=NOW(), payload=$2 WHERE id=$3 RETURNING *`,
+                [uploadedKey, nextPayload, row.id]
+              );
+              row = upd.rows[0] || row;
+            } else {
+              const upd = await client.query(
+                `UPDATE products SET image_url=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
+                [uploadedKey, row.id]
+              );
+              row = upd.rows[0] || row;
+            }
           }
 
           await client.query("COMMIT");
           return row;
         } catch (err) {
           await client.query("ROLLBACK");
-          if (uploadedKey) {
-            // rollback DB but bucket might have an orphan file — delete best-effort
-            await deleteSupabaseKey(uploadedKey);
-          }
           throw err;
         }
       });
 
       const signed = await withSignedImage(createdRow);
-      res.json({ success: true, product: signed });
+      return res.json({ success: true, product: signed });
     } catch (e) {
-      logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-      // IMPORTANT: show real message in admin
-      res.status(500).json({ success: false, message: String(e?.message || e) });
+      if (uploadedKey) await deleteSupabaseKey(uploadedKey);
+
+      logError("products.create_failed", {
+        rid: req.rid || "-",
+        message: String(e?.message || e).slice(0, 900),
+      });
+
+      const msg = String(e?.message || e);
+      return res.status(500).json({
+        success: false,
+        message: IS_PROD ? "Create product failed" : `Create product failed: ${msg}`,
+      });
     }
   }
 );
 
-app.put("/admin/products/:id",
+app.put(
+  "/admin/products/:id",
   writeLimiter,
   requireAdmin,
   requireCsrf,
@@ -1176,13 +2191,13 @@ app.put("/admin/products/:id",
   validate(IdParamSchema, "params"),
   validate(UpdateProductSchema),
   async (req, res) => {
+    let newUploadedKey = "";
+
     try {
       const id = Number(req.params.id);
 
       const updatedRow = await withDbClient(async (client) => {
         await client.query("BEGIN");
-        let newUploadedKey = "";
-
         try {
           const current = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
           if (!current.rows.length) {
@@ -1194,57 +2209,73 @@ app.put("/admin/products/:id",
           const name = String(req.body?.name ?? existing.name).trim();
           const price = Math.max(0, Math.round(Number(req.body?.price ?? existing.price)));
           const description = String(req.body?.description ?? (existing.description || "")).trim();
-          const isActive = (req.body?.is_active === undefined)
-            ? Boolean(existing.is_active)
-            : (String(req.body.is_active).toLowerCase() !== "false");
+          const isActive =
+            req.body?.is_active === undefined
+              ? Boolean(existing.is_active)
+              : String(req.body.is_active).toLowerCase() !== "false";
 
           const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
 
-          // existing key
-          let imageKey = String(existing.image_url || "").trim() || null;
+          const payloadMerged =
+            DB_CAPS.products.columns.has("payload")
+              ? existing.payload && typeof existing.payload === "object"
+                ? Object.assign({}, existing.payload, req.body || {})
+                : Object.assign({}, req.body || {})
+              : null;
 
-          // merge payload safely
-          const payload = Object.assign({}, (existing.payload && typeof existing.payload === "object" ? existing.payload : {}), (req.body || {}));
+          let imageKey = String(existing.image_url || "").trim() || null;
 
           if (removeImage) {
             const oldKey = extractImageKey(existing) || imageKey;
             if (oldKey) await deleteSupabaseKey(oldKey);
             imageKey = null;
-            delete payload.__image_key;
+            if (payloadMerged && typeof payloadMerged === "object") delete payloadMerged.__image_key;
           }
 
           if (req.file?.buffer) {
-            // upload NEW first
+            if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+
+            // upload new first (so you don't lose old if upload fails)
             const up = await uploadProductImageToSupabase({
               buffer: req.file.buffer,
               originalName: req.file.originalname,
-              productId: id
+              productId: id,
             });
             newUploadedKey = up.key;
 
-            // delete old after new success
+            // delete old after new succeeded
             const oldKey = extractImageKey(existing) || imageKey;
             if (oldKey) await deleteSupabaseKey(oldKey);
 
             imageKey = newUploadedKey;
-            payload.__image_key = imageKey;
+            if (payloadMerged && typeof payloadMerged === "object") payloadMerged.__image_key = imageKey;
           }
 
-          const out = await client.query(
-            `
-            UPDATE products
-            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
-            WHERE id=$7
-            RETURNING *
-            `,
-            [name, price, description || null, imageKey, isActive, payload, id]
-          );
+          let row;
+          if (DB_CAPS.products.columns.has("payload")) {
+            const out = await client.query(
+              `UPDATE products
+               SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
+               WHERE id=$7
+               RETURNING *`,
+              [name, price, description || null, imageKey, isActive, payloadMerged || {}, id]
+            );
+            row = out.rows[0] || null;
+          } else {
+            const out = await client.query(
+              `UPDATE products
+               SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW()
+               WHERE id=$6
+               RETURNING *`,
+              [name, price, description || null, imageKey, isActive, id]
+            );
+            row = out.rows[0] || null;
+          }
 
           await client.query("COMMIT");
-          return out.rows[0] || null;
+          return row;
         } catch (err) {
           await client.query("ROLLBACK");
-          if (newUploadedKey) await deleteSupabaseKey(newUploadedKey);
           throw err;
         }
       });
@@ -1252,15 +2283,26 @@ app.put("/admin/products/:id",
       if (!updatedRow) return res.status(404).json({ success: false, message: "Product not found" });
 
       const signed = await withSignedImage(updatedRow);
-      res.json({ success: true, product: signed });
+      return res.json({ success: true, product: signed });
     } catch (e) {
-      logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-      res.status(500).json({ success: false, message: String(e?.message || e) });
+      if (newUploadedKey) await deleteSupabaseKey(newUploadedKey);
+
+      logError("products.update_failed", {
+        rid: req.rid || "-",
+        message: String(e?.message || e).slice(0, 900),
+      });
+
+      const msg = String(e?.message || e);
+      return res.status(500).json({
+        success: false,
+        message: IS_PROD ? "Update product failed" : `Update product failed: ${msg}`,
+      });
     }
   }
 );
 
-app.delete("/admin/products/:id",
+app.delete(
+  "/admin/products/:id",
   writeLimiter,
   requireAdmin,
   requireCsrf,
@@ -1269,10 +2311,10 @@ app.delete("/admin/products/:id",
     try {
       const id = Number(req.params.id);
 
-      const existed = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
-      if (!existed.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+      const current = await dbQuery(`SELECT * FROM products WHERE id=$1`, [id]);
+      if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
 
-      const oldKey = extractImageKey(existed.rows[0]);
+      const oldKey = extractImageKey(current.rows[0]);
       if (oldKey) await deleteSupabaseKey(oldKey);
 
       const out = await dbQuery(`DELETE FROM products WHERE id=$1 RETURNING id`, [id]);
@@ -1280,8 +2322,8 @@ app.delete("/admin/products/:id",
 
       res.json({ success: true });
     } catch (e) {
-      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-      res.status(500).json({ success: false, message: String(e?.message || e) });
+      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Delete failed" });
     }
   }
 );
@@ -1295,7 +2337,7 @@ app.use((err, req, res, next) => {
     rid,
     method: req?.method,
     path: req?.originalUrl,
-    message: msg.slice(0, 800)
+    message: msg.slice(0, 800),
   });
 
   if (msg.startsWith("Not allowed by CORS")) {
@@ -1306,6 +2348,14 @@ app.use((err, req, res, next) => {
 });
 
 /* ===================== START SERVER ===================== */
-app.listen(PORT, () => {
-  logInfo("boot", { msg: `Backend running on port ${PORT}` });
-});
+(async () => {
+  try {
+    if (pool) await initDbCaps();
+  } catch (e) {
+    logWarn("db_caps_init_failed", { message: String(e?.message || e).slice(0, 300) });
+  }
+
+  app.listen(PORT, () => {
+    logInfo("boot", { msg: `Backend running on port ${PORT}` });
+  });
+})();
