@@ -2,7 +2,7 @@
 // Backend on Render: https://kikelara1.onrender.com
 //
 // ✅ Fixes common 500s on /admin/products create/update by:
-//   - NEVER forcing Date.now() into int4 serial columns
+//   - Never forcing Date.now() into int4 serial columns
 //   - Loading table caps safely (lazy + on boot)
 //   - Falling back cleanly when columns differ
 //   - Uploading to Supabase Storage safely (rollback + cleanup on failure)
@@ -425,7 +425,7 @@ app.use((req, res, next) => {
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
-    contentSecurityPolicy: false, // keep off to avoid breaking Vercel/Render cross-origin scripts; enable later if you want.
+    contentSecurityPolicy: false, // keep off to avoid breaking cross-origin; enable later if you want.
   })
 );
 
@@ -497,10 +497,14 @@ const ALLOW_ORIGINS = [
   ...FRONTEND_ORIGINS,
 ];
 
+function originAllowed(origin) {
+  if (!origin) return true; // allow server-to-server
+  return ALLOW_ORIGINS.includes(origin);
+}
+
 const corsOptions = {
   origin: function (origin, cb) {
-    if (!origin) return cb(null, true); // allow server-to-server
-    if (ALLOW_ORIGINS.includes(origin)) return cb(null, true);
+    if (originAllowed(origin)) return cb(null, true);
     return cb(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -518,6 +522,17 @@ app.options(/.*/, cors(corsOptions));
 app.use(cookieParser(ADMIN_SECRET));
 
 /* ===================== PAYSTACK WEBHOOK (RAW ROUTE BEFORE JSON PARSER) ===================== */
+function timingSafeEqualStr(a, b) {
+  try {
+    const aa = Buffer.from(String(a || ""), "utf8");
+    const bb = Buffer.from(String(b || ""), "utf8");
+    if (aa.length !== bb.length) return false;
+    return crypto.timingSafeEqual(aa, bb);
+  } catch {
+    return false;
+  }
+}
+
 function paystackSignatureValid(rawBodyBuffer, signature) {
   if (!PAYSTACK_SECRET_KEY) return false;
   if (!rawBodyBuffer || !Buffer.isBuffer(rawBodyBuffer)) return false;
@@ -528,7 +543,7 @@ function paystackSignatureValid(rawBodyBuffer, signature) {
     .update(rawBodyBuffer)
     .digest("hex");
 
-  return hash === signature;
+  return timingSafeEqualStr(hash, signature);
 }
 
 async function verifyPaystack(reference) {
@@ -681,10 +696,7 @@ app.use(express.json({ limit: "200kb" }));
 app.use(express.urlencoded({ extended: true, limit: "200kb" }));
 
 /* ===================== SANITIZATION (OPTIONAL) ===================== */
-if (mongoSanitize) {
-  // NOTE: This is primarily for Mongo; harmless, but optional.
-  app.use(mongoSanitize());
-}
+if (mongoSanitize) app.use(mongoSanitize());
 if (xssClean) app.use(xssClean());
 if (hpp) app.use(hpp());
 
@@ -860,6 +872,17 @@ function sign(payloadB64) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
 }
+function safeEq(a, b) {
+  // base64url strings
+  try {
+    const aa = Buffer.from(String(a || ""), "utf8");
+    const bb = Buffer.from(String(b || ""), "utf8");
+    if (aa.length !== bb.length) return false;
+    return crypto.timingSafeEqual(aa, bb);
+  } catch {
+    return false;
+  }
+}
 function createToken(payloadObj) {
   const payloadB64 = base64url(JSON.stringify(payloadObj));
   return `${payloadB64}.${sign(payloadB64)}`;
@@ -869,7 +892,8 @@ function verifyToken(token) {
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const [payloadB64, sig] = parts;
-  if (sig !== sign(payloadB64)) return null;
+  const expected = sign(payloadB64);
+  if (!safeEq(sig, expected)) return null;
 
   try {
     const payload = JSON.parse(unbase64url(payloadB64));
@@ -881,6 +905,8 @@ function verifyToken(token) {
 }
 
 // In-memory allowlist (logout invalidates)
+// ✅ Enforced always: if token jti missing from map => invalid.
+// (This means a server restart logs out admins — safer.)
 const adminJtiMap = new Map(); // jti -> expMs
 function cleanupJti() {
   const now = Date.now();
@@ -904,11 +930,11 @@ function requireAdmin(req, res, next) {
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
 
-  if (payload.jti && adminJtiMap.size > 0) {
-    const exp = adminJtiMap.get(payload.jti);
-    if (!exp || Date.now() > exp) {
-      return res.status(401).json({ success: false, message: "Session expired" });
-    }
+  // ✅ Enforce allowlist
+  if (!payload.jti) return res.status(401).json({ success: false, message: "Session expired" });
+  const exp = adminJtiMap.get(payload.jti);
+  if (!exp || Date.now() > exp) {
+    return res.status(401).json({ success: false, message: "Session expired" });
   }
 
   req.admin = payload;
@@ -1004,7 +1030,7 @@ app.get("/admin/me", requireAdmin, (req, res) => {
   res.json({ success: true, admin: req.admin, csrfToken: String(req.cookies?.[CSRF_COOKIE] || "") });
 });
 
-// Optional: rotate CSRF token
+// Optional: rotate CSRF token (no CSRF required)
 app.post("/admin/csrf/rotate", requireAdmin, (req, res) => {
   const csrfToken = randomToken(20);
   res.cookie(CSRF_COOKIE, csrfToken, { ...CSRF_COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
@@ -1465,7 +1491,6 @@ app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res)
         String(name), String(email), String(message), new Date(),
       ]);
     } catch (e) {
-      // fallback if your table requires id
       const fallbackId = Math.floor(Date.now() / 1000);
       await dbQuery(`INSERT INTO messages (id, name, email, message, created_at) VALUES ($1,$2,$3,$4,$5)`, [
         fallbackId, String(name), String(email), String(message), new Date(),
@@ -1866,11 +1891,165 @@ app.delete("/admin/reviews/:id", writeLimiter, requireAdmin, requireCsrf, valida
 });
 
 /* ===================== PRODUCTS (ADMIN) ===================== */
+function capsLoadedProducts() {
+  return DB_CAPS.products?.columns && DB_CAPS.products.columns.size > 0;
+}
+function hasProductCol(c) {
+  return DB_CAPS.products?.columns?.has(c);
+}
+
+function makeSafeProductId() {
+  const t = String(DB_CAPS.products?.idType || "").toLowerCase();
+  if (t.includes("uuid")) return crypto.randomUUID();
+  if (t.includes("bigint")) return Date.now(); // bigint ok
+  if (t.includes("integer") || t.includes("int")) return Math.floor(Date.now() / 1000); // int4 safe
+  return Math.floor(Date.now() / 1000);
+}
+
+function buildInsertSQL(table, cols) {
+  const params = cols.map((_, i) => `$${i + 1}`);
+  return `INSERT INTO ${table} (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`;
+}
+function isUndefinedColumnErr(e) {
+  return String(e?.code || "") === "42703";
+}
+function isNotNullIdErr(e) {
+  return String(e?.code || "") === "23502" && (String(e?.column || "") === "id" || /column "id"/i.test(String(e?.message || "")));
+}
+
+async function insertProductRow(client, { id, name, price, description, imageKey, isActive, payload }) {
+  const now = new Date();
+  const candidates = [];
+
+  // Best attempt if caps loaded
+  if (capsLoadedProducts()) {
+    const cols = [];
+    const vals = [];
+
+    const includeId = DB_CAPS.products.idHasDefault === false && hasProductCol("id");
+    if (includeId) { cols.push("id"); vals.push(id); }
+    if (hasProductCol("name")) { cols.push("name"); vals.push(name); }
+    if (hasProductCol("price")) { cols.push("price"); vals.push(price); }
+    if (hasProductCol("description")) { cols.push("description"); vals.push(description || null); }
+    if (hasProductCol("image_url")) { cols.push("image_url"); vals.push(imageKey || null); }
+    if (hasProductCol("is_active")) { cols.push("is_active"); vals.push(isActive); }
+    if (hasProductCol("created_at")) { cols.push("created_at"); vals.push(now); }
+    if (hasProductCol("updated_at")) { cols.push("updated_at"); vals.push(now); }
+    if (hasProductCol("payload")) { cols.push("payload"); vals.push(payload || {}); }
+    if (hasProductCol("images")) { cols.push("images"); vals.push([]); }
+
+    if (cols.length >= 2) candidates.push({ sql: buildInsertSQL("products", cols), vals });
+  }
+
+  // Fallback attempts (unknown schema)
+  const baseNoId = [
+    { cols: ["name", "price", "description", "image_url", "is_active", "created_at", "updated_at"], vals: [name, price, description || null, imageKey || null, isActive, now, now] },
+    { cols: ["name", "price", "description", "image_url", "is_active"], vals: [name, price, description || null, imageKey || null, isActive] },
+    { cols: ["name", "price", "description", "image_url"], vals: [name, price, description || null, imageKey || null] },
+    { cols: ["name", "price", "description"], vals: [name, price, description || null] },
+    { cols: ["name", "price"], vals: [name, price] },
+  ];
+  const baseWithId = [
+    { cols: ["id", "name", "price", "description", "image_url", "is_active", "created_at", "updated_at"], vals: [id, name, price, description || null, imageKey || null, isActive, now, now] },
+    { cols: ["id", "name", "price", "description", "image_url", "is_active"], vals: [id, name, price, description || null, imageKey || null, isActive] },
+    { cols: ["id", "name", "price"], vals: [id, name, price] },
+  ];
+
+  for (const c of baseNoId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
+  for (const c of baseWithId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
+
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      const r = await client.query(cand.sql, cand.vals);
+      if (r.rows?.[0]) return r.rows[0];
+    } catch (e) {
+      lastErr = e;
+      if (isUndefinedColumnErr(e) || isNotNullIdErr(e)) continue;
+      // if table differs in other ways, try next candidates too
+      continue;
+    }
+  }
+  throw lastErr || new Error("Insert failed");
+}
+
+async function updateProductRow(client, id, { name, price, description, imageKey, isActive, payloadMerged }) {
+  // Prefer caps-based dynamic update
+  if (capsLoadedProducts()) {
+    const sets = [];
+    const vals = [];
+    let i = 0;
+
+    if (hasProductCol("name")) { sets.push(`name=$${++i}`); vals.push(name); }
+    if (hasProductCol("price")) { sets.push(`price=$${++i}`); vals.push(price); }
+    if (hasProductCol("description")) { sets.push(`description=$${++i}`); vals.push(description || null); }
+    if (hasProductCol("image_url")) { sets.push(`image_url=$${++i}`); vals.push(imageKey || null); }
+    if (hasProductCol("is_active")) { sets.push(`is_active=$${++i}`); vals.push(isActive); }
+    if (hasProductCol("payload")) { sets.push(`payload=$${++i}`); vals.push(payloadMerged || {}); }
+    if (hasProductCol("updated_at")) { sets.push(`updated_at=NOW()`); }
+
+    if (!sets.length) throw new Error("No updatable columns found on products table");
+
+    vals.push(id);
+    const sql = `UPDATE products SET ${sets.join(", ")} WHERE id=$${++i} RETURNING *`;
+    const r = await client.query(sql, vals);
+    return r.rows?.[0] || null;
+  }
+
+  // Fallbacks if caps not loaded
+  const candidates = [
+    {
+      sql: `UPDATE products
+            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
+            WHERE id=$7 RETURNING *`,
+      vals: [name, price, description || null, imageKey || null, isActive, payloadMerged || {}, id],
+    },
+    {
+      sql: `UPDATE products
+            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW()
+            WHERE id=$6 RETURNING *`,
+      vals: [name, price, description || null, imageKey || null, isActive, id],
+    },
+    {
+      sql: `UPDATE products
+            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5
+            WHERE id=$6 RETURNING *`,
+      vals: [name, price, description || null, imageKey || null, isActive, id],
+    },
+    {
+      sql: `UPDATE products
+            SET name=$1, price=$2, image_url=$3, is_active=$4
+            WHERE id=$5 RETURNING *`,
+      vals: [name, price, imageKey || null, isActive, id],
+    },
+    {
+      sql: `UPDATE products
+            SET name=$1, price=$2
+            WHERE id=$3 RETURNING *`,
+      vals: [name, price, id],
+    },
+  ];
+
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      const r = await client.query(cand.sql, cand.vals);
+      if (r.rows?.[0]) return r.rows[0];
+      return null;
+    } catch (e) {
+      lastErr = e;
+      if (isUndefinedColumnErr(e)) continue;
+      continue;
+    }
+  }
+  throw lastErr || new Error("Update failed");
+}
+
 app.get("/admin/products", requireAdmin, async (req, res) => {
   try {
     await ensureCapsLoaded("products");
     const out = await dbQuery(`SELECT * FROM products ORDER BY created_at DESC`);
-    const rows = await Promise.all(out.rows.map(witxhSignedImage));
+    const rows = await Promise.all(out.rows.map(withSignedImage)); // ✅ fixed typo
     res.json({ success: true, products: rows });
   } catch (e) {
     logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
@@ -1897,56 +2076,6 @@ const UpdateProductSchema = z
   })
   .passthrough();
 
-function makeSafeProductId() {
-  const t = String(DB_CAPS.products?.idType || "").toLowerCase();
-  if (t.includes("uuid")) return crypto.randomUUID();
-  if (t.includes("bigint")) return Date.now(); // bigint ok
-  if (t.includes("integer") || t.includes("int")) return Math.floor(Date.now() / 1000); // int4 safe
-  return Math.floor(Date.now() / 1000);
-}
-
-function buildProductInsert({ id, name, price, description, imageKey, isActive, payload }) {
-  const cols = [];
-  const vals = [];
-  const params = [];
-
-  const has = (c) => DB_CAPS.products.columns.has(c);
-
-  // Only include id if caps are loaded AND id has no default
-  const capsLoaded = DB_CAPS.products.columns.size > 0;
-  const includeId = capsLoaded && DB_CAPS.products.idHasDefault === false && has("id");
-
-  if (includeId) {
-    cols.push("id"); vals.push(id);
-  }
-  if (has("name")) { cols.push("name"); vals.push(name); }
-  if (has("price")) { cols.push("price"); vals.push(price); }
-  if (has("description")) { cols.push("description"); vals.push(description || null); }
-  if (has("image_url")) { cols.push("image_url"); vals.push(imageKey || null); }
-  if (has("is_active")) { cols.push("is_active"); vals.push(isActive); }
-  if (has("created_at")) { cols.push("created_at"); vals.push(new Date()); }
-  if (has("updated_at")) { cols.push("updated_at"); vals.push(new Date()); }
-  if (has("payload")) { cols.push("payload"); vals.push(payload || {}); }
-  if (has("images")) { cols.push("images"); vals.push([]); }
-
-  // If caps weren’t loaded, use a safe default set of columns without forcing id.
-  if (!capsLoaded || cols.length === 0) {
-    const fallbackCols = ["name", "price", "description", "image_url", "is_active", "created_at", "updated_at"];
-    const fallbackVals = [name, price, description || null, imageKey || null, isActive, new Date(), new Date()];
-    const p2 = fallbackCols.map((_, i) => `$${i + 1}`);
-    return {
-      sql: `INSERT INTO products (${fallbackCols.join(",")}) VALUES (${p2.join(",")}) RETURNING *`,
-      values: fallbackVals,
-    };
-  }
-
-  for (let i = 0; i < vals.length; i++) params.push(`$${i + 1}`);
-  return {
-    sql: `INSERT INTO products (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`,
-    values: vals,
-  };
-}
-
 app.post(
   "/admin/products",
   writeLimiter,
@@ -1965,7 +2094,6 @@ app.post(
       const description = String(req.body.description || "").trim();
       const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
 
-      // Keep full payload only if payload column exists
       const payload = { ...req.body };
 
       const createdRow = await withDbClient(async (client) => {
@@ -1973,7 +2101,7 @@ app.post(
         try {
           const id = makeSafeProductId();
 
-          const insQ = buildProductInsert({
+          let row = await insertProductRow(client, {
             id,
             name,
             price,
@@ -1982,21 +2110,6 @@ app.post(
             isActive,
             payload,
           });
-
-          let row = null;
-          try {
-            const ins = await client.query(insQ.sql, insQ.values);
-            row = ins.rows[0] || null;
-          } catch (e) {
-            // Last-resort fallback (includes id safely)
-            const fallbackId = makeSafeProductId();
-            const cols = ["id", "name", "price", "description", "image_url", "is_active", "created_at", "updated_at"];
-            const vals = [fallbackId, name, price, description || null, null, isActive, new Date(), new Date()];
-            const params = cols.map((_, i) => `$${i + 1}`);
-            const sql = `INSERT INTO products (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`;
-            const ins2 = await client.query(sql, vals);
-            row = ins2.rows[0] || null;
-          }
 
           if (!row) throw new Error("Insert failed");
 
@@ -2020,7 +2133,7 @@ app.post(
 
             logInfo("products.image_uploaded", { rid: req.rid || "-", productId: row.id, key: uploadedKey });
 
-            const hasPayload = DB_CAPS.products.columns.has("payload");
+            const hasPayload = hasProductCol("payload");
             const nextPayload = hasPayload
               ? Object.assign(
                   {},
@@ -2030,19 +2143,15 @@ app.post(
                 )
               : null;
 
-            if (DB_CAPS.products.columns.has("payload")) {
-              const upd = await client.query(
-                `UPDATE products SET image_url=$1, updated_at=NOW(), payload=$2 WHERE id=$3 RETURNING *`,
-                [uploadedKey, nextPayload, row.id]
-              );
-              row = upd.rows[0] || row;
-            } else {
-              const upd = await client.query(
-                `UPDATE products SET image_url=$1, updated_at=NOW() WHERE id=$2 RETURNING *`,
-                [uploadedKey, row.id]
-              );
-              row = upd.rows[0] || row;
-            }
+            // update image + payload safely
+            row = await updateProductRow(client, row.id, {
+              name: row.name ?? name,
+              price: row.price ?? price,
+              description: row.description ?? description,
+              imageKey: uploadedKey,
+              isActive: row.is_active ?? isActive,
+              payloadMerged: nextPayload,
+            });
           }
 
           await client.query("COMMIT");
@@ -2103,7 +2212,7 @@ app.put(
           const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
 
           const payloadMerged =
-            DB_CAPS.products.columns.has("payload")
+            hasProductCol("payload")
               ? existing.payload && typeof existing.payload === "object"
                 ? Object.assign({}, existing.payload, req.body || {})
                 : Object.assign({}, req.body || {})
@@ -2135,26 +2244,14 @@ app.put(
             if (payloadMerged && typeof payloadMerged === "object") payloadMerged.__image_key = imageKey;
           }
 
-          let row = null;
-          if (DB_CAPS.products.columns.has("payload")) {
-            const out = await client.query(
-              `UPDATE products
-               SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
-               WHERE id=$7
-               RETURNING *`,
-              [name, price, description || null, imageKey, isActive, payloadMerged || {}, id]
-            );
-            row = out.rows[0] || null;
-          } else {
-            const out = await client.query(
-              `UPDATE products
-               SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW()
-               WHERE id=$6
-               RETURNING *`,
-              [name, price, description || null, imageKey, isActive, id]
-            );
-            row = out.rows[0] || null;
-          }
+          const row = await updateProductRow(client, id, {
+            name,
+            price,
+            description,
+            imageKey,
+            isActive,
+            payloadMerged,
+          });
 
           await client.query("COMMIT");
           return row;
@@ -2235,7 +2332,6 @@ app.use((err, req, res, next) => {
     if (!pool) logWarn("boot.no_database", { message: "DATABASE_URL not set (API will fail DB routes)" });
     if (pool) await initDbCaps();
 
-    // Warn if admin is not configured
     if (!ADMIN_PASSWORD_HASH) logWarn("boot.admin_not_configured", { message: "ADMIN_PASSWORD_HASH missing" });
 
     app.listen(PORT, () => {
