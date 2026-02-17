@@ -145,6 +145,17 @@ async function dbQuery(text, params) {
   return pool.query(text, params);
 }
 
+// ✅ For transactions (create/update product with image)
+async function withDbClient(fn) {
+  if (!pool) throw new Error("DATABASE_URL not set");
+  const client = await pool.connect();
+  try {
+    return await fn(client);
+  } finally {
+    client.release();
+  }
+}
+
 /* ===================== CORS ===================== */
 const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
   .split(",")
@@ -431,7 +442,6 @@ const speedLimiter = slowDown({
 app.use(globalLimiter);
 app.use(speedLimiter);
 
-// ✅ CORS (FIXED: allow Accept header so preflight passes and edit/delete/upload work)
 const corsOptions = {
   origin: function (origin, cb) {
     if (!origin) return cb(null, true);
@@ -439,16 +449,9 @@ const corsOptions = {
     return cb(new Error("Not allowed by CORS: " + origin));
   },
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Accept",
-    "X-CSRF-Token",
-    "x-csrf-token",
-    "x-paystack-signature"
-  ],
+  allowedHeaders: ["Content-Type","X-CSRF-Token","x-csrf-token","x-paystack-signature"],
   credentials: true,
-  optionsSuccessStatus: 204,
-  maxAge: 86400
+  optionsSuccessStatus: 204
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
@@ -714,7 +717,6 @@ async function toWebpSquareBuffer(buf) {
     .toBuffer();
 }
 
-// ✅ Improved error visibility (shows bucket/key + real Supabase message)
 async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
   ensureSupabaseReady();
 
@@ -731,12 +733,7 @@ async function uploadProductImageToSupabase({ buffer, originalName, productId })
       upsert: false
     });
 
-  if (upErr) {
-    throw new Error(
-      `Supabase upload failed (bucket=${SUPABASE_BUCKET}, key=${key}): ${upErr.message || "unknown error"}`
-    );
-  }
-
+  if (upErr) throw new Error(upErr.message || "Supabase upload failed");
   return { key };
 }
 
@@ -864,7 +861,7 @@ function requireCsrf(req, res, next) {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
 
   const cookieVal = String(req.cookies?.[CSRF_COOKIE] || "");
-  const headerVal = String(req.headers["x-csrf-token"] || "");
+  const headerVal = String(req.headers["x-csrf-token"] || req.headers["x-csrf-token".toLowerCase()] || "");
 
   if (!cookieVal || !headerVal || cookieVal !== headerVal) {
     const ip = getClientIp(req);
@@ -923,6 +920,8 @@ const CartItemSchema = z.object({
   total: z.coerce.number().min(0).optional()
 }).passthrough();
 
+const zISO = zISODateStr;
+
 const OrdersSchema = z.object({
   reference: zNonEmpty("Missing reference").max(200),
   name: zNonEmpty("Missing name").max(120),
@@ -939,7 +938,7 @@ const OrdersSchema = z.object({
 
   status: z.string().optional().default("Pending"),
   paystackRef: z.string().optional().default(""),
-  createdAt: zISODateStr,
+  createdAt: zISO,
 
   paidAt: z.string().optional(),
   amountPaid: z.coerce.number().optional()
@@ -964,20 +963,6 @@ const OrdersSchema = z.object({
 const VerifyPaystackSchema = z.object({
   reference: zNonEmpty("Missing reference").max(200),
   expectedAmount: z.coerce.number().min(0).optional()
-});
-
-/* ===================== ✅ REVIEWS SCHEMAS (NEW) ===================== */
-const ReviewCreateSchema = z.object({
-  name: zNonEmpty("Missing name").max(80, "Name too long").default("Anonymous"),
-  title: zNonEmpty("Missing title").min(3, "Title too short").max(60, "Title too long"),
-  text: zNonEmpty("Missing text").min(10, "Text too short").max(500, "Text too long"),
-  rating: z.coerce.number().int().min(1).max(5),
-  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long")
-});
-
-const VoteSchema = z.object({
-  voteType: z.enum(["up", "down"]),
-  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long")
 });
 
 /* ===================== HEALTH ===================== */
@@ -1051,457 +1036,6 @@ app.get("/admin/me", requireAdmin, (req, res) => {
   res.json({ success: true, admin: req.admin });
 });
 
-/* ===================== DELIVERY PRICING (POSTGRES) ===================== */
-function buildDefaultNigeriaPricing(fee = 5000) {
-  const FEE = Math.max(0, Math.round(Number(fee) || 0));
-  const statesAndCapitals = [
-    { name: "Abia", city: "Umuahia" },
-    { name: "Adamawa", city: "Yola" },
-    { name: "Akwa Ibom", city: "Uyo" },
-    { name: "Anambra", city: "Awka" },
-    { name: "Bauchi", city: "Bauchi" },
-    { name: "Bayelsa", city: "Yenagoa" },
-    { name: "Benue", city: "Makurdi" },
-    { name: "Borno", city: "Maiduguri" },
-    { name: "Cross River", city: "Calabar" },
-    { name: "Delta", city: "Asaba" },
-    { name: "Ebonyi", city: "Abakaliki" },
-    { name: "Edo", city: "Benin City" },
-    { name: "Ekiti", city: "Ado-Ekiti" },
-    { name: "Enugu", city: "Enugu" },
-    { name: "FCT", city: "Abuja" },
-    { name: "Gombe", city: "Gombe" },
-    { name: "Imo", city: "Owerri" },
-    { name: "Jigawa", city: "Dutse" },
-    { name: "Kaduna", city: "Kaduna" },
-    { name: "Kano", city: "Kano" },
-    { name: "Katsina", city: "Katsina" },
-    { name: "Kebbi", city: "Birnin Kebbi" },
-    { name: "Kogi", city: "Lokoja" },
-    { name: "Kwara", city: "Ilorin" },
-    { name: "Lagos", city: "Ikeja" },
-    { name: "Nasarawa", city: "Lafia" },
-    { name: "Niger", city: "Minna" },
-    { name: "Ogun", city: "Abeokuta" },
-    { name: "Ondo", city: "Akure" },
-    { name: "Osun", city: "Osogbo" },
-    { name: "Oyo", city: "Ibadan" },
-    { name: "Plateau", city: "Jos" },
-    { name: "Rivers", city: "Port Harcourt" },
-    { name: "Sokoto", city: "Sokoto" },
-    { name: "Taraba", city: "Jalingo" },
-    { name: "Yobe", city: "Damaturu" },
-    { name: "Zamfara", city: "Gusau" }
-  ];
-  return {
-    defaultFee: FEE,
-    updatedAt: new Date().toISOString(),
-    states: statesAndCapitals
-      .map(s => ({ name: s.name, cities: [{ name: s.city, fee: FEE }] }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  };
-}
-
-function sanitizePricing(input) {
-  const out = { defaultFee: 5000, updatedAt: new Date().toISOString(), states: [] };
-  const def = Number(input?.defaultFee);
-  out.defaultFee = Number.isFinite(def) && def >= 0 ? Math.round(def) : 5000;
-
-  const states = Array.isArray(input?.states) ? input.states : [];
-  out.states = states
-    .map(s => {
-      const name = String(s?.name || "").trim();
-      const citiesIn = Array.isArray(s?.cities) ? s.cities : [];
-      const cities = citiesIn
-        .map(c => ({
-          name: String(c?.name || "").trim(),
-          fee: Math.round(Number(c?.fee))
-        }))
-        .filter(c => c.name && Number.isFinite(c.fee) && c.fee >= 0);
-      return { name, cities };
-    })
-    .filter(s => s.name);
-
-  out.states.sort((a, b) => a.name.localeCompare(b.name));
-  out.states.forEach(s => s.cities.sort((a, b) => a.name.localeCompare(b.name)));
-  return out;
-}
-
-async function getPricing() {
-  const r = await dbQuery(`SELECT default_fee, updated_at, data FROM delivery_pricing WHERE id = 1`);
-  if (!r.rows.length) {
-    const seeded = buildDefaultNigeriaPricing(5000);
-    await dbQuery(
-      `INSERT INTO delivery_pricing (id, default_fee, updated_at, data) VALUES (1, $1, NOW(), $2)`,
-      [seeded.defaultFee, seeded]
-    );
-    return seeded;
-  }
-  const row = r.rows[0];
-  const obj = row.data && typeof row.data === "object" ? row.data : {};
-  return {
-    defaultFee: Number(row.default_fee) || 5000,
-    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString(),
-    states: Array.isArray(obj.states) ? obj.states : []
-  };
-}
-
-app.get("/delivery-pricing", async (req, res) => {
-  try {
-    const pricing = await getPricing();
-    res.json(pricing);
-  } catch (e) {
-    logError("pricing.get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json(buildDefaultNigeriaPricing(5000));
-  }
-});
-
-app.get("/admin/delivery-pricing", requireAdmin, async (req, res) => {
-  try {
-    const pricing = await getPricing();
-    res.json({ success: true, pricing });
-  } catch (e) {
-    logError("pricing.admin_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, pricing: buildDefaultNigeriaPricing(5000) });
-  }
-});
-
-app.put("/admin/delivery-pricing", writeLimiter, requireAdmin, requireCsrf, validate(DeliveryPricingSchema), async (req, res) => {
-  try {
-    const cleaned = sanitizePricing(req.body);
-    cleaned.updatedAt = new Date().toISOString();
-
-    await dbQuery(
-      `UPDATE delivery_pricing SET default_fee = $1, updated_at = NOW(), data = $2 WHERE id = 1`,
-      [cleaned.defaultFee, cleaned]
-    );
-
-    res.json({ success: true, pricing: cleaned });
-  } catch (e) {
-    logError("pricing.admin_put_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, message: "Failed to update pricing" });
-  }
-});
-
-app.post("/admin/delivery-pricing/seed", writeLimiter, requireAdmin, requireCsrf, validate(SeedPricingSchema), async (req, res) => {
-  try {
-    const fee = Number(req.body?.fee);
-    const seedFee = Number.isFinite(fee) && fee >= 0 ? Math.round(fee) : 5000;
-
-    const seeded = buildDefaultNigeriaPricing(seedFee);
-    seeded.updatedAt = new Date().toISOString();
-
-    await dbQuery(
-      `UPDATE delivery_pricing SET default_fee = $1, updated_at = NOW(), data = $2 WHERE id = 1`,
-      [seeded.defaultFee, seeded]
-    );
-
-    res.json({ success: true, pricing: seeded });
-  } catch (e) {
-    logError("pricing.seed_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, message: "Failed to seed pricing" });
-  }
-});
-
-/* ===================== ORDERS (IDEMPOTENT UPSERT) ===================== */
-async function insertOrderIdempotent(reference, status, payload) {
-  const ins = await dbQuery(
-    `INSERT INTO orders (reference, status, payload)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (reference) DO NOTHING
-     RETURNING *`,
-    [reference, status, payload]
-  );
-
-  if (ins.rows.length) return ins.rows[0];
-
-  const sel = await dbQuery(`SELECT * FROM orders WHERE reference = $1 LIMIT 1`, [reference]);
-  return sel.rows[0] || null;
-}
-
-app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
-  try {
-    const payload = req.body;
-    const reference = String(payload.reference || payload.paystackRef || "").trim();
-    if (!reference) return res.status(400).json({ success: false, message: "Missing reference" });
-
-    payload.status = "Pending";
-    const row = await insertOrderIdempotent(reference, "Pending", payload);
-    return res.json({ success: true, order: row });
-  } catch (err) {
-    logError("orders.create_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    res.status(500).json({ success: false, message: "Failed to save order" });
-  }
-});
-
-app.post("/order", (req, res) => { req.url = "/orders"; app._router.handle(req, res); });
-
-app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchema), async (req, res) => {
-  try {
-    const ip = getClientIp(req);
-    const { reference, expectedAmount } = req.body;
-
-    const verify = await verifyPaystack(reference);
-
-    const ok = Boolean(verify?.status) && verify?.data?.status === "success";
-    if (!ok) {
-      logWarn("security.paystack_verify_failed", { rid: req.rid || "-", ip, reference });
-      return res.status(400).json({ success: false, message: "Payment not verified" });
-    }
-
-    const paidKobo = Number(verify?.data?.amount || 0);
-    const paidNaira = Math.round(paidKobo / 100);
-
-    if (expectedAmount !== undefined && Number.isFinite(Number(expectedAmount))) {
-      const exp = Math.round(Number(expectedAmount));
-      if (Math.abs(exp - paidNaira) > 2) {
-        logWarn("security.paystack_amount_mismatch", { rid: req.rid || "-", ip, reference, expectedAmount: exp, paidNaira });
-        return res.status(400).json({ success: false, message: "Amount mismatch" });
-      }
-    }
-
-    const existing = await dbQuery(`SELECT * FROM orders WHERE reference = $1 LIMIT 1`, [reference]);
-    if (!existing.rows.length) {
-      const payload = {
-        reference,
-        status: "Paid",
-        paystackRef: reference,
-        createdAt: new Date().toISOString(),
-        paidAt: new Date().toISOString(),
-        amountPaid: paidNaira,
-        paystackTransactionId: verify?.data?.id ?? null,
-        note: "Created via verify endpoint (order not previously posted)"
-      };
-
-      const created = await insertOrderIdempotent(reference, "Paid", payload);
-      return res.json({ success: true, verified: true, order: created });
-    }
-
-    const order = existing.rows[0];
-    const payload = order.payload && typeof order.payload === "object" ? order.payload : {};
-    payload.status = "Paid";
-    payload.paystackRef = reference;
-    payload.paidAt = payload.paidAt || new Date().toISOString();
-    payload.amountPaid = payload.amountPaid || paidNaira;
-    payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
-
-    const upd = await dbQuery(
-      `UPDATE orders
-       SET status = 'Paid', payload = $2
-       WHERE reference = $1
-       RETURNING *`,
-      [reference, payload]
-    );
-
-    logInfo("security.paystack_verified", { rid: req.rid || "-", ip, reference, paidNaira });
-    return res.json({ success: true, verified: true, order: upd.rows[0] });
-  } catch (e) {
-    logError("paystack.verify_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    return res.status(500).json({ success: false, message: "Verification failed" });
-  }
-});
-
-/* ===================== ORDERS ADMIN ===================== */
-app.get("/orders", requireAdmin, async (req, res) => {
-  try {
-    const status = String(req.query.status || "").trim();
-    const q = String(req.query.q || "").trim().toLowerCase();
-
-    let sql = `SELECT * FROM orders`;
-    const where = [];
-    const params = [];
-
-    if (status) {
-      params.push(status);
-      where.push(`status = $${params.length}`);
-    }
-
-    if (q) {
-      params.push(`%${q}%`);
-      const p = `$${params.length}`;
-      where.push(`(
-        LOWER(reference) LIKE ${p}
-        OR LOWER(payload->>'name') LIKE ${p}
-        OR LOWER(payload->>'phone') LIKE ${p}
-        OR LOWER(payload->>'email') LIKE ${p}
-      )`);
-    }
-
-    if (where.length) sql += ` WHERE ` + where.join(" AND ");
-    sql += ` ORDER BY created_at DESC`;
-
-    const out = await dbQuery(sql, params);
-    res.json(out.rows);
-  } catch (err) {
-    logError("orders.list_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    res.status(500).json([]);
-  }
-});
-
-app.patch("/orders/:id/status",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  validate(OrderStatusSchema, "body"),
-  async (req, res) => {
-    try {
-      const orderId = Number(req.params.id);
-      const status = String(req.body.status || "").trim();
-
-      const updated = await dbQuery(
-        `UPDATE orders SET status = $1 WHERE id = $2 RETURNING *`,
-        [status, orderId]
-      );
-
-      if (!updated.rows.length) return res.status(404).json({ success: false, message: "Order not found" });
-      res.json({ success: true, order: updated.rows[0] });
-    } catch (err) {
-      logError("orders.status_patch_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Failed to update status" });
-    }
-  }
-);
-
-/* ===================== CONTACT ===================== */
-const GMAIL_USER = process.env.GMAIL_USER || "";
-const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || "";
-const transporter = (GMAIL_USER && GMAIL_APP_PASS)
-  ? nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS }
-    })
-  : null;
-
-app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res) => {
-  try {
-    const ip = getClientIp(req);
-
-    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
-    if (!okCaptcha) {
-      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
-      return res.status(400).json({ success: false, msg: "Captcha failed. Try again." });
-    }
-
-    const { name, email, message } = req.body;
-
-    await dbQuery(
-      `INSERT INTO messages (id, name, email, message, created_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [Date.now(), String(name), String(email), String(message), new Date()]
-    );
-
-    if (transporter) {
-      await transporter.sendMail({
-        from: GMAIL_USER,
-        replyTo: email,
-        to: GMAIL_USER,
-        subject: `New Contact from ${name}`,
-        text: `Name: ${name}\nEmail: ${email}\n\nMessage:\n${message}`
-      });
-    }
-
-    res.json({ success: true, msg: "Message received — we will reply soon!" });
-  } catch (err) {
-    logError("contact.failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    res.status(500).json({ success: false, msg: "Server error" });
-  }
-});
-
-/* ===================== NEWSLETTER ===================== */
-app.post("/api/newsletter/subscribe", writeLimiter, validate(NewsletterSchema), async (req, res) => {
-  try {
-    const ip = getClientIp(req);
-
-    const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
-    if (!okCaptcha) {
-      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
-      return res.status(400).json({ ok: false, message: "Captcha failed. Try again." });
-    }
-
-    const emailRaw = req.body.email;
-
-    const exists = await dbQuery(`SELECT 1 FROM newsletter_subscribers WHERE email = $1`, [emailRaw]);
-    const already = exists.rows.length > 0;
-
-    if (!already) {
-      await dbQuery(
-        `INSERT INTO newsletter_subscribers (id, email, subscribed_at)
-         VALUES ($1, $2, $3)`,
-        [Date.now(), emailRaw, new Date()]
-      );
-    }
-
-    if (transporter) {
-      await transporter.sendMail({
-        from: `KÍKÉLÁRÁ <${GMAIL_USER}>`,
-        to: emailRaw,
-        subject: "✅ You’re subscribed — welcome to KÍKÉLÁRÁ",
-        text:
-`Hi,
-
-Thanks for subscribing to KÍKÉLÁRÁ ✨
-You’ll be first to know about product drops, restocks, and skincare tips.
-
-If you didn’t subscribe, you can ignore this email.
-
-— KÍKÉLÁRÁ Skincare`,
-        html:
-`<div style="font-family:Arial,sans-serif;line-height:1.6;color:#2b1d12;">
-  <h2 style="margin:0 0 10px;">Welcome to KÍKÉLÁRÁ ✨</h2>
-  <p style="margin:0 0 12px;">Thanks for subscribing. You’ll be first to know about product drops, restocks, and skincare tips.</p>
-  <p style="margin:0 0 12px;"><b>Your email:</b> ${emailRaw}</p>
-  <p style="margin:0;">If you didn’t subscribe, ignore this email.</p>
-  <hr style="border:none;border-top:1px solid #e8d7c7;margin:16px 0;">
-  <p style="margin:0;font-size:12px;opacity:.75;">© ${new Date().getFullYear()} KÍKÉLÁRÁ Skincare</p>
-</div>`
-      });
-    }
-
-    return res.json({
-      ok: true,
-      already,
-      message: transporter
-        ? (already ? "Already subscribed — confirmation sent." : "Subscribed — confirmation sent.")
-        : (already ? "Already subscribed." : "Subscribed.")
-    });
-  } catch (err) {
-    logError("newsletter.failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    return res.status(500).json({ ok: false, message: "Server error" });
-  }
-});
-
-/* ===================== MESSAGES (ADMIN) ===================== */
-app.get("/admin/messages", requireAdmin, async (req, res) => {
-  try {
-    const out = await dbQuery(`SELECT * FROM messages ORDER BY created_at DESC`);
-    res.json(out.rows);
-  } catch (e) {
-    logError("messages.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.json([]);
-  }
-});
-
-app.delete("/admin/messages/:id",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-
-      const out = await dbQuery(`DELETE FROM messages WHERE id = $1 RETURNING id`, [id]);
-      if (!out.rows.length) return res.status(404).json({ success: false, message: "Message not found" });
-
-      res.json({ success: true });
-    } catch (e) {
-      logError("messages.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Delete failed" });
-    }
-  }
-);
-
 /* ===================== PRODUCTS (POSTGRES) ===================== */
 app.get("/api/products", async (req, res) => {
   try {
@@ -1522,236 +1056,6 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-/* ===================== ✅ PRODUCT DETAILS (PUBLIC) ===================== */
-app.get("/api/products/:id",
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-
-      const out = await dbQuery(`SELECT * FROM products WHERE id = $1 LIMIT 1`, [id]);
-      if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
-
-      const p = out.rows[0];
-      if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
-
-      const signed = await withSignedImage(p);
-      res.json({ success: true, product: signed });
-    } catch (e) {
-      logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Server error" });
-    }
-  }
-);
-
-/* ===================== ✅ REVIEWS (PUBLIC) ===================== */
-async function getReviewsWithVotes(productId) {
-  const r = await dbQuery(
-    `
-    SELECT
-      pr.*,
-      COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
-      COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
-    FROM product_reviews pr
-    LEFT JOIN review_votes rv ON rv.review_id = pr.id
-    WHERE pr.product_id = $1
-    GROUP BY pr.id
-    ORDER BY pr.created_at DESC
-    LIMIT 200
-    `,
-    [productId]
-  );
-
-  return r.rows.map(x => ({
-    id: x.id,
-    product_id: x.product_id,
-    name: x.name,
-    title: x.title,
-    text: x.text,
-    rating: x.rating,
-    verified: x.verified,
-    device_id: x.device_id,
-    created_at: x.created_at,
-    votes: { up: x.up_votes, down: x.down_votes }
-  }));
-}
-
-app.get("/api/products/:id/reviews",
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const productId = Number(req.params.id);
-
-      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
-      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, reviews: [] });
-
-      const reviews = await getReviewsWithVotes(productId);
-      res.json({ ok: true, reviews });
-    } catch (e) {
-      logError("reviews.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ ok: false, reviews: [] });
-    }
-  }
-);
-
-app.get("/api/products/:id/reviews/summary",
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const productId = Number(req.params.id);
-
-      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
-      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, summary: { avg: 0, count: 0 } });
-
-      const out = await dbQuery(
-        `SELECT COALESCE(AVG(rating),0)::float AS avg, COUNT(*)::int AS count
-         FROM product_reviews
-         WHERE product_id = $1`,
-        [productId]
-      );
-
-      const row = out.rows[0] || { avg: 0, count: 0 };
-      res.json({ ok: true, summary: { avg: Number(row.avg || 0), count: Number(row.count || 0) } });
-    } catch (e) {
-      logError("reviews.summary_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ ok: false, summary: { avg: 0, count: 0 } });
-    }
-  }
-);
-
-app.post("/api/products/:id/reviews",
-  writeLimiter,
-  validate(IdParamSchema, "params"),
-  validate(ReviewCreateSchema),
-  async (req, res) => {
-    try {
-      const productId = Number(req.params.id);
-
-      const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
-      if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, message: "Product not found" });
-
-      const name = String(req.body.name || "Anonymous").trim() || "Anonymous";
-      const title = String(req.body.title || "").trim().slice(0, 60);
-      const text = String(req.body.text || "").trim().slice(0, 500);
-      const rating = Math.max(1, Math.min(5, Number(req.body.rating || 0)));
-      const deviceId = String(req.body.deviceId || "").trim();
-
-      const ins = await dbQuery(
-        `
-        INSERT INTO product_reviews (product_id, name, title, text, rating, verified, device_id)
-        VALUES ($1,$2,$3,$4,$5,false,$6)
-        ON CONFLICT (product_id, device_id) DO UPDATE
-          SET name=EXCLUDED.name,
-              title=EXCLUDED.title,
-              text=EXCLUDED.text,
-              rating=EXCLUDED.rating
-        RETURNING *
-        `,
-        [productId, name, title, text, rating, deviceId]
-      );
-
-      const row = ins.rows[0];
-      const review = {
-        id: row.id,
-        product_id: row.product_id,
-        name: row.name,
-        title: row.title,
-        text: row.text,
-        rating: row.rating,
-        verified: row.verified,
-        device_id: row.device_id,
-        created_at: row.created_at,
-        votes: { up: 0, down: 0 }
-      };
-
-      res.json({ ok: true, review });
-    } catch (e) {
-      logError("reviews.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ ok: false, message: "Failed to submit review" });
-    }
-  }
-);
-
-app.post("/api/reviews/:id/vote",
-  writeLimiter,
-  validate(IdParamSchema, "params"),
-  validate(VoteSchema),
-  async (req, res) => {
-    try {
-      const reviewId = Number(req.params.id);
-      const voteType = String(req.body.voteType);
-      const deviceId = String(req.body.deviceId || "").trim();
-
-      const exists = await dbQuery(`SELECT id FROM product_reviews WHERE id=$1 LIMIT 1`, [reviewId]);
-      if (!exists.rows.length) return res.status(404).json({ ok: false, message: "Review not found" });
-
-      await dbQuery(
-        `
-        INSERT INTO review_votes (review_id, device_id, vote_type)
-        VALUES ($1,$2,$3)
-        ON CONFLICT (review_id, device_id) DO UPDATE SET vote_type=EXCLUDED.vote_type
-        `,
-        [reviewId, deviceId, voteType]
-      );
-
-      const r = await dbQuery(
-        `
-        SELECT
-          pr.*,
-          COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
-          COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
-        FROM product_reviews pr
-        LEFT JOIN review_votes rv ON rv.review_id = pr.id
-        WHERE pr.id = $1
-        GROUP BY pr.id
-        LIMIT 1
-        `,
-        [reviewId]
-      );
-
-      const x = r.rows[0];
-      const review = {
-        id: x.id,
-        product_id: x.product_id,
-        name: x.name,
-        title: x.title,
-        text: x.text,
-        rating: x.rating,
-        verified: x.verified,
-        device_id: x.device_id,
-        created_at: x.created_at,
-        votes: { up: x.up_votes, down: x.down_votes }
-      };
-
-      res.json({ ok: true, review });
-    } catch (e) {
-      logError("reviews.vote_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ ok: false, message: "Vote failed" });
-    }
-  }
-);
-
-/* ===================== ✅ REVIEWS (ADMIN DELETE) ===================== */
-app.delete("/admin/reviews/:id",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-
-      const del = await dbQuery(`DELETE FROM product_reviews WHERE id=$1 RETURNING id`, [id]);
-      if (!del.rows.length) return res.status(404).json({ success: false, message: "Review not found" });
-
-      res.json({ success: true });
-    } catch (e) {
-      logError("reviews.admin_delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Delete failed" });
-    }
-  }
-);
-
 /* ===================== PRODUCTS ADMIN ===================== */
 app.get("/admin/products", requireAdmin, async (req, res) => {
   try {
@@ -1760,7 +1064,8 @@ app.get("/admin/products", requireAdmin, async (req, res) => {
     res.json({ success: true, products: rows });
   } catch (e) {
     logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, products: [] });
+    // IMPORTANT: return real message for debugging admin
+    res.status(500).json({ success: false, message: String(e?.message || e), products: [] });
   }
 });
 
@@ -1787,56 +1092,78 @@ app.post("/admin/products",
   validate(CreateProductSchema),
   async (req, res) => {
     try {
-      const id = Date.now();
       const name = String(req.body.name || "").trim();
       const price = Math.max(0, Math.round(Number(req.body.price || 0)));
       const description = String(req.body.description || "").trim();
       const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
 
-      let imageKey = null;
+      // ✅ Transaction: insert first (DB generates ID), then upload image, then update row
+      const createdRow = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        let uploadedKey = "";
 
-      if (req.file?.buffer) {
-        logInfo("products.image_received", {
-          rid: req.rid || "-",
-          productId: id,
-          bytes: req.file.size,
-          mimetype: req.file.mimetype,
-          name: req.file.originalname
-        });
+        try {
+          // Insert WITHOUT forcing id (avoids int overflow / schema mismatch)
+          const payload = { ...req.body };
 
-        const up = await uploadProductImageToSupabase({
-          buffer: req.file.buffer,
-          originalName: req.file.originalname,
-          productId: id
-        });
-        imageKey = up.key;
+          const ins = await client.query(
+            `
+            INSERT INTO products (name, price, description, image_url, is_active, created_at, updated_at, payload)
+            VALUES ($1,$2,$3,$4,$5,NOW(),NOW(),$6)
+            RETURNING *
+            `,
+            [name, price, description || null, null, isActive, payload]
+          );
 
-        logInfo("products.image_uploaded", {
-          rid: req.rid || "-",
-          productId: id,
-          key: imageKey
-        });
-      }
+          let row = ins.rows[0];
 
-      const payload = { ...req.body };
-      if (imageKey) payload.__image_key = imageKey;
+          // If payload column doesn't exist in your table, fall back gracefully
+          if (!row) {
+            throw new Error("Insert failed (no row returned)");
+          }
 
-      const out = await dbQuery(
-        `INSERT INTO products (id, name, price, description, image_url, images, is_active, created_at, updated_at, payload)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW(),$8)
-         RETURNING *`,
-        [id, name, price, description || null, imageKey, JSON.stringify([]), isActive, payload]
-      );
+          if (req.file?.buffer) {
+            const up = await uploadProductImageToSupabase({
+              buffer: req.file.buffer,
+              originalName: req.file.originalname,
+              productId: row.id
+            });
+            uploadedKey = up.key;
 
-      const signed = await withSignedImage(out.rows[0]);
+            // store key in payload too (safe), but if payload column doesn't exist, update still works
+            const nextPayload = Object.assign({}, (row.payload && typeof row.payload === "object" ? row.payload : {}), payload, { __image_key: uploadedKey });
+
+            const upd = await client.query(
+              `
+              UPDATE products
+              SET image_url=$1, updated_at=NOW(), payload=$2
+              WHERE id=$3
+              RETURNING *
+              `,
+              [uploadedKey, nextPayload, row.id]
+            );
+
+            row = upd.rows[0] || row;
+          }
+
+          await client.query("COMMIT");
+          return row;
+        } catch (err) {
+          await client.query("ROLLBACK");
+          if (uploadedKey) {
+            // rollback DB but bucket might have an orphan file — delete best-effort
+            await deleteSupabaseKey(uploadedKey);
+          }
+          throw err;
+        }
+      });
+
+      const signed = await withSignedImage(createdRow);
       res.json({ success: true, product: signed });
     } catch (e) {
       logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-      const msg = String(e?.message || e);
-      res.status(500).json({
-        success: false,
-        message: IS_PROD ? "Create product failed" : `Create product failed: ${msg}`
-      });
+      // IMPORTANT: show real message in admin
+      res.status(500).json({ success: false, message: String(e?.message || e) });
     }
   }
 );
@@ -1852,76 +1179,83 @@ app.put("/admin/products/:id",
     try {
       const id = Number(req.params.id);
 
-      const current = await dbQuery(`SELECT * FROM products WHERE id = $1`, [id]);
-      if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+      const updatedRow = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        let newUploadedKey = "";
 
-      const existing = current.rows[0];
+        try {
+          const current = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+          if (!current.rows.length) {
+            await client.query("ROLLBACK");
+            return null;
+          }
+          const existing = current.rows[0];
 
-      const name = String(req.body?.name ?? existing.name).trim();
-      const price = Math.max(0, Math.round(Number(req.body?.price ?? existing.price)));
-      const description = String(req.body?.description ?? (existing.description || "")).trim();
-      const isActive = (req.body?.is_active === undefined)
-        ? Boolean(existing.is_active)
-        : (String(req.body.is_active).toLowerCase() !== "false");
+          const name = String(req.body?.name ?? existing.name).trim();
+          const price = Math.max(0, Math.round(Number(req.body?.price ?? existing.price)));
+          const description = String(req.body?.description ?? (existing.description || "")).trim();
+          const isActive = (req.body?.is_active === undefined)
+            ? Boolean(existing.is_active)
+            : (String(req.body.is_active).toLowerCase() !== "false");
 
-      const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
+          const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
 
-      const payload = Object.assign({}, existing.payload || {}, req.body || {});
+          // existing key
+          let imageKey = String(existing.image_url || "").trim() || null;
 
-      let imageKey = String(existing.image_url || "").trim();
+          // merge payload safely
+          const payload = Object.assign({}, (existing.payload && typeof existing.payload === "object" ? existing.payload : {}), (req.body || {}));
 
-      if (removeImage) {
-        const oldKey = extractImageKey(existing) || imageKey;
-        if (oldKey) await deleteSupabaseKey(oldKey);
-        imageKey = null;
-        delete payload.__image_key;
-      }
+          if (removeImage) {
+            const oldKey = extractImageKey(existing) || imageKey;
+            if (oldKey) await deleteSupabaseKey(oldKey);
+            imageKey = null;
+            delete payload.__image_key;
+          }
 
-      if (req.file?.buffer) {
-        logInfo("products.image_received", {
-          rid: req.rid || "-",
-          productId: id,
-          bytes: req.file.size,
-          mimetype: req.file.mimetype,
-          name: req.file.originalname
-        });
+          if (req.file?.buffer) {
+            // upload NEW first
+            const up = await uploadProductImageToSupabase({
+              buffer: req.file.buffer,
+              originalName: req.file.originalname,
+              productId: id
+            });
+            newUploadedKey = up.key;
 
-        const oldKey = extractImageKey(existing) || imageKey;
-        if (oldKey) await deleteSupabaseKey(oldKey);
+            // delete old after new success
+            const oldKey = extractImageKey(existing) || imageKey;
+            if (oldKey) await deleteSupabaseKey(oldKey);
 
-        const up = await uploadProductImageToSupabase({
-          buffer: req.file.buffer,
-          originalName: req.file.originalname,
-          productId: id
-        });
+            imageKey = newUploadedKey;
+            payload.__image_key = imageKey;
+          }
 
-        imageKey = up.key;
-        payload.__image_key = imageKey;
+          const out = await client.query(
+            `
+            UPDATE products
+            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
+            WHERE id=$7
+            RETURNING *
+            `,
+            [name, price, description || null, imageKey, isActive, payload, id]
+          );
 
-        logInfo("products.image_uploaded", {
-          rid: req.rid || "-",
-          productId: id,
-          key: imageKey
-        });
-      }
+          await client.query("COMMIT");
+          return out.rows[0] || null;
+        } catch (err) {
+          await client.query("ROLLBACK");
+          if (newUploadedKey) await deleteSupabaseKey(newUploadedKey);
+          throw err;
+        }
+      });
 
-      const out = await dbQuery(
-        `UPDATE products
-         SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
-         WHERE id=$7
-         RETURNING *`,
-        [name, price, description || null, imageKey, isActive, payload, id]
-      );
+      if (!updatedRow) return res.status(404).json({ success: false, message: "Product not found" });
 
-      const signed = await withSignedImage(out.rows[0]);
+      const signed = await withSignedImage(updatedRow);
       res.json({ success: true, product: signed });
     } catch (e) {
       logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-      const msg = String(e?.message || e);
-      res.status(500).json({
-        success: false,
-        message: IS_PROD ? "Update product failed" : `Update product failed: ${msg}`
-      });
+      res.status(500).json({ success: false, message: String(e?.message || e) });
     }
   }
 );
@@ -1935,19 +1269,19 @@ app.delete("/admin/products/:id",
     try {
       const id = Number(req.params.id);
 
-      const current = await dbQuery(`SELECT * FROM products WHERE id = $1`, [id]);
-      if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+      const existed = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+      if (!existed.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
 
-      const oldKey = extractImageKey(current.rows[0]);
+      const oldKey = extractImageKey(existed.rows[0]);
       if (oldKey) await deleteSupabaseKey(oldKey);
 
-      const out = await dbQuery(`DELETE FROM products WHERE id = $1 RETURNING id`, [id]);
+      const out = await dbQuery(`DELETE FROM products WHERE id=$1 RETURNING id`, [id]);
       if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
 
       res.json({ success: true });
     } catch (e) {
-      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Delete failed" });
+      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      res.status(500).json({ success: false, message: String(e?.message || e) });
     }
   }
 );
