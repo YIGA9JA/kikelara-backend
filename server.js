@@ -1,20 +1,35 @@
-// server.js (FULL — UPDATED + HARDENED + ZOD)
+// server.js (FULL — MULTI PRODUCT IMAGES + SELECT DISPLAY/DETAIL + FEATURED + PRICING + ORDERS + REVIEWS + SECURITY)
 // Backend on Render: https://kikelara1.onrender.com
 //
-// ✅ Fixes common 500s on /admin/products create/update by:
-//   - Never forcing Date.now() into int4 serial columns
-//   - Loading table caps safely (lazy + on boot)
-//   - Falling back cleanly when columns differ
-//   - Uploading to Supabase Storage safely (rollback + cleanup on failure)
-// ✅ Security:
-//   - Helmet, rate limit + slow down + temp-ban
-//   - Strict cookie session (httpOnly) + CSRF cookie/header
-//   - CORS with credentials done correctly
-//   - Zod validation across endpoints
-//   - Safer structured logging with redaction
+// ENV (Render):
+//   DATABASE_URL
+//   NODE_ENV=production
+//   ADMIN_SECRET
+//   ADMIN_PASSWORD_HASH          (bcrypt hash)
+//   PAYSTACK_SECRET_KEY          (optional if you use Paystack verify/webhook)
+//   SUPABASE_URL
+//   SUPABASE_SERVICE_ROLE_KEY
+//   SUPABASE_BUCKET=kikelara     (or your bucket)
+//   SIGNED_URL_TTL_SECONDS=604800 (7d) optional
+//   FRONTEND_ORIGINS=https://yourdomain.com,https://another.com  (optional extra)
+//   HCAPTCHA_SECRET_KEY          (optional)
+//   CAPTCHA_REQUIRED=true/false  (default true)
+//   GMAIL_USER + GMAIL_APP_PASS  (optional for emails)
 //
-// NOTE:
-// - Node 18+ recommended (built-in fetch). If older, install node-fetch.
+// Required DB tables (you already have most):
+//  - products (id, name, price, description, image_url, is_active, payload jsonb, created_at, updated_at)
+//  - orders (id, reference UNIQUE, status, payload jsonb, created_at)
+//  - messages (id, name, email, message, created_at)
+//  - newsletter_subscribers (id, email UNIQUE, subscribed_at)
+//  - delivery_pricing (id=1, default_fee, updated_at, data jsonb)
+//  - homepage_featured (id, title, link_url, image_key, sort_order, is_active, created_at, updated_at, payload jsonb)
+//  - paystack_events (for webhook replay protection) (recommended)
+//
+// Reviews (optional):
+//  - product_reviews (id, product_id text, name, title, text, rating int, verified bool, device_id text, created_at)
+//  - review_votes (id, review_id bigint, device_id text, vote_type text, created_at)
+//
+// NOTE: Node 18+ recommended (built-in fetch). If older: install node-fetch.
 
 "use strict";
 
@@ -33,14 +48,13 @@ const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
 const { createClient } = require("@supabase/supabase-js");
 
-// Security middlewares (optional but recommended if installed)
+// Optional security middlewares (only used if installed)
 let rateLimit, slowDown, xssClean, mongoSanitize, hpp;
 try { rateLimit = require("express-rate-limit"); } catch {}
 try { slowDown = require("express-slow-down"); } catch {}
 try { xssClean = require("xss-clean"); } catch {}
 try { mongoSanitize = require("express-mongo-sanitize"); } catch {}
 try { hpp = require("hpp"); } catch {}
-
 try { require("dotenv").config(); } catch {}
 
 const app = express();
@@ -55,20 +69,18 @@ const SERVICE_NAME = process.env.SERVICE_NAME || "kikelara-api";
 const ENV = process.env.NODE_ENV || "development";
 const IS_PROD = ENV === "production";
 
-// 🔐 IMPORTANT: Set a strong ADMIN_SECRET in Render env
+/* ===================== ADMIN AUTH CONFIG ===================== */
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "CHANGE_ME_SUPER_SECRET";
-const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || ""; // bcrypt hash
-const ADMIN_TOTP_SECRET = process.env.ADMIN_TOTP_SECRET || ""; // optional future 2FA secret
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH || "";
+const ADMIN_TOTP_SECRET = process.env.ADMIN_TOTP_SECRET || ""; // optional (not implemented)
 
-// Paystack
+/* ===================== PAYSTACK ===================== */
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || "";
 
-/* ===================== COOKIE + CSRF ===================== */
+/* ===================== COOKIES + CSRF ===================== */
 const COOKIE_NAME = "admin_session";
 const CSRF_COOKIE = "admin_csrf";
 
-// If frontend and backend are different domains (Vercel + Render),
-// SameSite=None; Secure MUST be used in production.
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: IS_PROD,
@@ -96,38 +108,8 @@ async function ensureFetch() {
   return fetchFn;
 }
 
-/* ===================== CAPTCHA (HCAPTCHA) ===================== */
-const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY || "";
-const CAPTCHA_REQUIRED =
-  String(process.env.CAPTCHA_REQUIRED || "true").toLowerCase() !== "false";
-
-async function verifyHCaptchaToken(token, ip) {
-  if (!CAPTCHA_REQUIRED) return true;
-  if (!HCAPTCHA_SECRET_KEY) return false;
-  if (!token) return false;
-
-  const f = await ensureFetch();
-  if (!f) throw new Error("fetch not available (captcha verify)");
-
-  const form = new URLSearchParams();
-  form.append("secret", HCAPTCHA_SECRET_KEY);
-  form.append("response", String(token));
-  if (ip) form.append("remoteip", String(ip));
-
-  const r = await f("https://hcaptcha.com/siteverify", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: form.toString(),
-  });
-
-  const data = await r.json().catch(() => null);
-  return Boolean(data?.success);
-}
-
-/* ===================== LOGGING (SAFE JSON) ===================== */
-function nowIso() {
-  return new Date().toISOString();
-}
+/* ===================== SAFE LOGGING ===================== */
+function nowIso() { return new Date().toISOString(); }
 
 function log(level, event, payload = {}) {
   const line = { ts: nowIso(), level, service: SERVICE_NAME, env: ENV, event, ...payload };
@@ -159,51 +141,16 @@ function isSensitiveKey(k) {
   return SENSITIVE_KEYWORDS.some((s) => key.includes(s));
 }
 
-function safeClone(obj, { maxString = 500, maxArray = 40, depth = 3 } = {}) {
-  const seen = new WeakSet();
-  function walk(x, d) {
-    if (x === null || x === undefined) return x;
-    if (typeof x === "string") return x.length > maxString ? x.slice(0, maxString) + "…" : x;
-    if (typeof x === "number" || typeof x === "boolean") return x;
-    if (Buffer.isBuffer(x)) return `[Buffer ${x.length} bytes]`;
-
-    if (typeof x === "object") {
-      if (seen.has(x)) return "[Circular]";
-      seen.add(x);
-
-      if (Array.isArray(x)) {
-        const arr = x.slice(0, maxArray).map((v) => walk(v, d - 1));
-        return x.length > maxArray ? [...arr, `…(+${x.length - maxArray} more)`] : arr;
-      }
-
-      if (d <= 0) return "[Object]";
-      const out = {};
-      for (const [k, v] of Object.entries(x)) {
-        out[k] = isSensitiveKey(k) ? "[REDACTED]" : walk(v, d - 1);
-      }
-      return out;
-    }
-    return String(x);
-  }
-  return walk(obj, depth);
-}
-
 function safeHeaders(req) {
   const keep = {};
   const hdrs = req.headers || {};
   for (const [k, v] of Object.entries(hdrs)) {
     const lk = k.toLowerCase();
-
-    if (lk === "authorization" || lk === "cookie" || lk === "set-cookie") {
-      keep[lk] = "[REDACTED]";
-      continue;
-    }
-
-    if (["origin", "referer", "user-agent", "content-type", "accept", "x-forwarded-proto", "x-paystack-signature", "x-csrf-token"].includes(lk)) {
+    if (lk === "authorization" || lk === "cookie" || lk === "set-cookie") { keep[lk] = "[REDACTED]"; continue; }
+    if (["origin","referer","user-agent","content-type","accept","x-forwarded-proto","x-paystack-signature","x-csrf-token"].includes(lk)) {
       keep[lk] = typeof v === "string" ? (v.length > 300 ? v.slice(0, 300) + "…" : v) : v;
       continue;
     }
-
     if (isSensitiveKey(lk)) keep[lk] = "[REDACTED]";
   }
   return keep;
@@ -215,41 +162,19 @@ function safeQuery(req) {
   for (const [k, v] of Object.entries(q)) {
     out[k] = isSensitiveKey(k)
       ? "[REDACTED]"
-      : typeof v === "string"
-      ? v.length > 300
-        ? v.slice(0, 300) + "…"
-        : v
-      : v;
+      : (typeof v === "string" ? (v.length > 300 ? v.slice(0, 300) + "…" : v) : v);
   }
   return out;
 }
 
-function shouldLogBody(req) {
-  const p = req.path || "";
-  if (req.method === "GET" || req.method === "HEAD") return false;
-
-  if (p.startsWith("/admin/login")) return false;
-  if (p.startsWith("/orders") || p.startsWith("/order")) return false;
-  if (p.startsWith("/api/contact") || p.startsWith("/api/newsletter")) return false;
-  if (p.startsWith("/admin/products")) return false;
-  if (p.startsWith("/payments/paystack/webhook")) return false;
-
-  return true;
-}
-
-/* ===================== TEMP BAN LIST ===================== */
+/* ===================== TEMP BAN (LIGHT) ===================== */
 const banMap = new Map();
-
 function isBanned(ip) {
   const v = banMap.get(ip);
   if (!v) return false;
-  if (Date.now() > v.until) {
-    banMap.delete(ip);
-    return false;
-  }
+  if (Date.now() > v.until) { banMap.delete(ip); return false; }
   return true;
 }
-
 function banIp(ip, minutes, reason) {
   const until = Date.now() + minutes * 60 * 1000;
   const prev = banMap.get(ip);
@@ -258,14 +183,13 @@ function banIp(ip, minutes, reason) {
   logWarn("security.temp_ban", { ip, minutes, reason, until: new Date(until).toISOString(), hits });
 }
 
-/* ===================== REQUEST LOGGER (RID) ===================== */
+/* ===================== REQUEST LOGGER ===================== */
 app.use((req, res, next) => {
   const rid = makeRid();
   req.rid = rid;
   res.setHeader("X-Request-Id", rid);
 
   const ip = getClientIp(req);
-
   if (isBanned(ip)) {
     logWarn("security.banned_request", { rid, ip, method: req.method, path: req.originalUrl });
     return res.status(403).json({ success: false, message: "Access blocked. Try later." });
@@ -285,39 +209,10 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const end = process.hrtime.bigint();
     const ms = Number(end - start) / 1e6;
-
-    const payload = {
-      rid,
-      ip,
-      method: req.method,
-      path: req.originalUrl,
-      status: res.statusCode,
-      ms: Math.round(ms),
-    };
-
-    if (shouldLogBody(req) && req.body && typeof req.body === "object") {
-      payload.body = safeClone(req.body, { maxString: 400, maxArray: 25, depth: 2 });
-    }
-
+    const payload = { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms) };
     if (res.statusCode >= 500) logError("http.res", payload);
     else if (res.statusCode >= 400) logWarn("http.res", payload);
     else logInfo("http.res", payload);
-  });
-
-  res.on("close", () => {
-    if (!res.writableEnded) {
-      const end = process.hrtime.bigint();
-      const ms = Number(end - start) / 1e6;
-      logWarn("http.close", {
-        rid,
-        ip,
-        method: req.method,
-        path: req.originalUrl,
-        status: res.statusCode,
-        ms: Math.round(ms),
-        note: "client_aborted",
-      });
-    }
   });
 
   next();
@@ -335,18 +230,13 @@ async function dbQuery(text, params) {
   if (!pool) throw new Error("DATABASE_URL not set");
   return pool.query(text, params);
 }
-
 async function withDbClient(fn) {
   if (!pool) throw new Error("DATABASE_URL not set");
   const client = await pool.connect();
-  try {
-    return await fn(client);
-  } finally {
-    client.release();
-  }
+  try { return await fn(client); } finally { client.release(); }
 }
 
-/* ===================== DB CAPABILITIES ===================== */
+/* ===================== DB CAPS (SCHEMA FLEX) ===================== */
 const DB_CAPS = {
   products: { columns: new Set(), idType: "", idHasDefault: true },
   messages: { columns: new Set(), idType: "", idHasDefault: true },
@@ -365,11 +255,9 @@ async function tableExists(tableName) {
 
 async function loadTableCaps(tableName) {
   const r = await dbQuery(
-    `
-    SELECT column_name, data_type, column_default
-    FROM information_schema.columns
-    WHERE table_schema='public' AND table_name=$1
-    `,
+    `SELECT column_name, data_type, column_default
+     FROM information_schema.columns
+     WHERE table_schema='public' AND table_name=$1`,
     [tableName]
   );
 
@@ -383,7 +271,6 @@ async function loadTableCaps(tableName) {
       idHasDefault = String(row.column_default || "").includes("nextval");
     }
   }
-
   return { columns: cols, idType, idHasDefault };
 }
 
@@ -402,22 +289,18 @@ async function ensureCapsLoaded(tableName) {
 
 async function initDbCaps() {
   if (!pool) return;
-
   await ensureCapsLoaded("products");
   await ensureCapsLoaded("messages");
   await ensureCapsLoaded("newsletter_subscribers");
-
   try { DB_CAPS.product_reviews.exists = await tableExists("product_reviews"); } catch { DB_CAPS.product_reviews.exists = false; }
   try { DB_CAPS.review_votes.exists = await tableExists("review_votes"); } catch { DB_CAPS.review_votes.exists = false; }
 }
 
-/* ===================== SECURITY HEADERS + HTTPS REDIRECT ===================== */
+/* ===================== SECURITY HEADERS + HTTPS ===================== */
 app.use((req, res, next) => {
   if (IS_PROD) {
     const proto = req.headers["x-forwarded-proto"];
-    if (proto && proto !== "https") {
-      return res.redirect(301, "https://" + req.headers.host + req.originalUrl);
-    }
+    if (proto && proto !== "https") return res.redirect(301, "https://" + req.headers.host + req.originalUrl);
   }
   next();
 });
@@ -425,7 +308,7 @@ app.use((req, res, next) => {
 app.use(
   helmet({
     crossOriginResourcePolicy: false,
-    contentSecurityPolicy: false, // keep off to avoid breaking cross-origin; enable later if you want.
+    contentSecurityPolicy: false, // keep off for cross-origin frontends
   })
 );
 
@@ -438,7 +321,7 @@ app.use((req, res, next) => {
 
 app.use(compression());
 
-/* ===================== RATE LIMIT + SLOW DOWN ===================== */
+/* ===================== RATE LIMIT / SLOW DOWN ===================== */
 function rateLimitWithSecurityLog(name, opts) {
   if (!rateLimit) return (req, res, next) => next();
 
@@ -448,19 +331,8 @@ function rateLimitWithSecurityLog(name, opts) {
     legacyHeaders: false,
     handler: (req, res) => {
       const ip = getClientIp(req);
-
-      logWarn("security.rate_limit_429", {
-        rid: req.rid || "-",
-        limiter: name,
-        ip,
-        method: req.method,
-        path: req.originalUrl,
-        headers: safeHeaders(req),
-        query: safeQuery(req),
-      });
-
+      logWarn("security.rate_limit_429", { rid: req.rid || "-", limiter: name, ip, method: req.method, path: req.originalUrl });
       banIp(ip, 10, `rate_limit:${name}`);
-
       res.status(429).json({ success: false, message: "Too many requests. Please try again later." });
     },
   });
@@ -468,14 +340,10 @@ function rateLimitWithSecurityLog(name, opts) {
 
 const globalLimiter = rateLimitWithSecurityLog("global", { windowMs: 15 * 60 * 1000, max: 500 });
 const authLimiter = rateLimitWithSecurityLog("auth", { windowMs: 10 * 60 * 1000, max: 25 });
-const writeLimiter = rateLimitWithSecurityLog("write", { windowMs: 5 * 60 * 1000, max: 60 });
+const writeLimiter = rateLimitWithSecurityLog("write", { windowMs: 5 * 60 * 1000, max: 80 });
 
 const speedLimiter = slowDown
-  ? slowDown({
-      windowMs: 15 * 60 * 1000,
-      delayAfter: 120,
-      delayMs: () => 250,
-    })
+  ? slowDown({ windowMs: 15 * 60 * 1000, delayAfter: 120, delayMs: () => 250 })
   : (req, res, next) => next();
 
 app.use(globalLimiter);
@@ -498,7 +366,7 @@ const ALLOW_ORIGINS = [
 ];
 
 function originAllowed(origin) {
-  if (!origin) return true; // allow server-to-server
+  if (!origin) return true; // server-to-server, curl
   return ALLOW_ORIGINS.includes(origin);
 }
 
@@ -521,16 +389,14 @@ app.options(/.*/, cors(corsOptions));
 /* ===================== COOKIE PARSER ===================== */
 app.use(cookieParser(ADMIN_SECRET));
 
-/* ===================== PAYSTACK WEBHOOK (RAW ROUTE BEFORE JSON PARSER) ===================== */
+/* ===================== PAYSTACK WEBHOOK (RAW BEFORE JSON) ===================== */
 function timingSafeEqualStr(a, b) {
   try {
     const aa = Buffer.from(String(a || ""), "utf8");
     const bb = Buffer.from(String(b || ""), "utf8");
     if (aa.length !== bb.length) return false;
     return crypto.timingSafeEqual(aa, bb);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function paystackSignatureValid(rawBodyBuffer, signature) {
@@ -538,169 +404,123 @@ function paystackSignatureValid(rawBodyBuffer, signature) {
   if (!rawBodyBuffer || !Buffer.isBuffer(rawBodyBuffer)) return false;
   if (!signature) return false;
 
-  const hash = crypto
-    .createHmac("sha512", PAYSTACK_SECRET_KEY)
-    .update(rawBodyBuffer)
-    .digest("hex");
-
+  const hash = crypto.createHmac("sha512", PAYSTACK_SECRET_KEY).update(rawBodyBuffer).digest("hex");
   return timingSafeEqualStr(hash, signature);
 }
 
 async function verifyPaystack(reference) {
   if (!PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
   const f = await ensureFetch();
-  if (!f) throw new Error("fetch not available (use Node 18+ or install node-fetch)");
+  if (!f) throw new Error("fetch not available (Node 18+ recommended)");
 
   const url = `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`;
-
-  const r = await f(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
-
+  const r = await f(url, { method: "GET", headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`, "Content-Type": "application/json" } });
   const data = await r.json().catch(() => null);
-  if (!r.ok) {
-    const msg = data?.message || `Paystack verify failed (${r.status})`;
-    throw new Error(msg);
-  }
+  if (!r.ok) throw new Error(data?.message || `Paystack verify failed (${r.status})`);
   return data;
 }
 
 async function recordPaystackEventOnce({ eventId, reference, eventType, payload, signature }) {
+  // requires paystack_events table (recommended)
   const r = await dbQuery(
-    `
-      insert into paystack_events (event_id, reference, event_type, payload, signature)
-      values ($1, $2, $3, $4, $5)
-      on conflict do nothing
-      returning id
-    `,
+    `insert into paystack_events (event_id, reference, event_type, payload, signature)
+     values ($1,$2,$3,$4,$5)
+     on conflict do nothing
+     returning id`,
     [String(eventId), String(reference), String(eventType), payload || {}, signature ? String(signature) : null]
   );
   return r.rows.length > 0;
 }
 
-app.post(
-  "/payments/paystack/webhook",
-  express.raw({ type: "application/json", limit: "300kb" }),
-  async (req, res) => {
-    const ip = getClientIp(req);
-
-    try {
-      const sig = String(req.headers["x-paystack-signature"] || "");
-
-      if (!paystackSignatureValid(req.body, sig)) {
-        logWarn("security.paystack_webhook_bad_sig", { rid: req.rid || "-", ip });
-        return res.status(200).json({ received: true, ignored: true });
-      }
-
-      const bodyString = req.body.toString("utf8");
-      let event = null;
-      try {
-        event = JSON.parse(bodyString);
-      } catch {
-        logWarn("paystack.webhook_bad_json", { rid: req.rid || "-", ip });
-        return res.status(200).json({ received: true, ignored: true });
-      }
-
-      const evtType = String(event?.event || "");
-      const data = event?.data || {};
-
-      if (evtType !== "charge.success") {
-        logInfo("paystack.webhook_ignored", { rid: req.rid || "-", ip, evtType });
-        return res.status(200).json({ received: true, ignored: true });
-      }
-
-      const reference = String(data?.reference || "").trim();
-      if (!reference) {
-        logWarn("paystack.webhook_missing_ref", { rid: req.rid || "-", ip });
-        return res.status(200).json({ received: true, ignored: true });
-      }
-
-      const eventId =
-        String(event?.id || data?.id || data?.transaction || "").trim() ||
-        `no_event_id:${reference}:${evtType}`;
-
-      const firstTime = await recordPaystackEventOnce({
-        eventId,
-        reference,
-        eventType: evtType,
-        payload: event,
-        signature: sig,
-      });
-
-      if (!firstTime) {
-        logInfo("paystack.webhook_replay_ignored", { rid: req.rid || "-", ip, reference, evtType });
-        return res.status(200).json({ received: true, ignored: true, replay: true });
-      }
-
-      const verify = await verifyPaystack(reference);
-      const ok = Boolean(verify?.status) && verify?.data?.status === "success";
-      if (!ok) {
-        logWarn("paystack.webhook_verify_failed", { rid: req.rid || "-", ip, reference });
-        return res.status(200).json({ received: true, ignored: true });
-      }
-
-      const paidKobo = Number(verify?.data?.amount || 0);
-      const paidNaira = Math.round(paidKobo / 100);
-
-      const existing = await dbQuery(`SELECT * FROM orders WHERE reference = $1 LIMIT 1`, [reference]);
-
-      if (!existing.rows.length) {
-        const payload = {
-          reference,
-          status: "Paid",
-          paystackRef: reference,
-          createdAt: new Date().toISOString(),
-          paidAt: new Date().toISOString(),
-          amountPaid: paidNaira,
-          paystackTransactionId: verify?.data?.id ?? null,
-          note: "Created via webhook (order not previously posted)",
-        };
-
-        await dbQuery(
-          `INSERT INTO orders (reference, status, payload)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (reference) DO NOTHING`,
-          [reference, "Paid", payload]
-        );
-
-        logInfo("paystack.webhook_created_paid", { rid: req.rid || "-", ip, reference, paidNaira });
-        return res.status(200).json({ ok: true });
-      }
-
-      const order = existing.rows[0];
-      const payload = order.payload && typeof order.payload === "object" ? order.payload : {};
-
-      payload.status = "Paid";
-      payload.paystackRef = reference;
-      payload.paidAt = payload.paidAt || new Date().toISOString();
-      payload.amountPaid = payload.amountPaid || paidNaira;
-      payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
-
-      await dbQuery(`UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1`, [reference, payload]);
-
-      logInfo("paystack.webhook_marked_paid", { rid: req.rid || "-", ip, reference, paidNaira });
-      return res.status(200).json({ ok: true });
-    } catch (e) {
-      logError("paystack.webhook_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+app.post("/payments/paystack/webhook", express.raw({ type: "application/json", limit: "300kb" }), async (req, res) => {
+  const ip = getClientIp(req);
+  try {
+    const sig = String(req.headers["x-paystack-signature"] || "");
+    if (!paystackSignatureValid(req.body, sig)) {
+      logWarn("security.paystack_webhook_bad_sig", { rid: req.rid || "-", ip });
       return res.status(200).json({ received: true, ignored: true });
     }
+
+    const bodyString = req.body.toString("utf8");
+    let event = null;
+    try { event = JSON.parse(bodyString); } catch {
+      logWarn("paystack.webhook_bad_json", { rid: req.rid || "-", ip });
+      return res.status(200).json({ received: true, ignored: true });
+    }
+
+    const evtType = String(event?.event || "");
+    const data = event?.data || {};
+    if (evtType !== "charge.success") return res.status(200).json({ received: true, ignored: true });
+
+    const reference = String(data?.reference || "").trim();
+    if (!reference) return res.status(200).json({ received: true, ignored: true });
+
+    const eventId = String(event?.id || data?.id || data?.transaction || "").trim() || `no_event_id:${reference}:${evtType}`;
+
+    // If paystack_events table isn't installed, this will throw; we ignore safely.
+    let firstTime = true;
+    try {
+      firstTime = await recordPaystackEventOnce({ eventId, reference, eventType: evtType, payload: event, signature: sig });
+    } catch {
+      firstTime = true;
+    }
+    if (!firstTime) return res.status(200).json({ received: true, ignored: true, replay: true });
+
+    const verify = await verifyPaystack(reference);
+    const ok = Boolean(verify?.status) && verify?.data?.status === "success";
+    if (!ok) return res.status(200).json({ received: true, ignored: true });
+
+    const paidKobo = Number(verify?.data?.amount || 0);
+    const paidNaira = Math.round(paidKobo / 100);
+
+    const existing = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
+    if (!existing.rows.length) {
+      const payload = {
+        reference,
+        status: "Paid",
+        paystackRef: reference,
+        createdAt: new Date().toISOString(),
+        paidAt: new Date().toISOString(),
+        amountPaid: paidNaira,
+        paystackTransactionId: verify?.data?.id ?? null,
+        note: "Created via webhook",
+      };
+
+      await dbQuery(
+        `INSERT INTO orders (reference, status, payload)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (reference) DO NOTHING`,
+        [reference, "Paid", payload]
+      );
+      return res.status(200).json({ ok: true });
+    }
+
+    const order = existing.rows[0];
+    const payload = order.payload && typeof order.payload === "object" ? order.payload : {};
+    payload.status = "Paid";
+    payload.paystackRef = reference;
+    payload.paidAt = payload.paidAt || new Date().toISOString();
+    payload.amountPaid = payload.amountPaid || paidNaira;
+    payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
+
+    await dbQuery(`UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1`, [reference, payload]);
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    logError("paystack.webhook_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(200).json({ received: true, ignored: true });
   }
-);
+});
 
-/* ===================== JSON PARSERS (AFTER RAW WEBHOOK) ===================== */
-app.use(express.json({ limit: "200kb" }));
-app.use(express.urlencoded({ extended: true, limit: "200kb" }));
+/* ===================== JSON PARSERS ===================== */
+app.use(express.json({ limit: "400kb" }));
+app.use(express.urlencoded({ extended: true, limit: "400kb" }));
 
-/* ===================== SANITIZATION (OPTIONAL) ===================== */
+/* ===================== OPTIONAL SANITIZERS ===================== */
 if (mongoSanitize) app.use(mongoSanitize());
 if (xssClean) app.use(xssClean());
 if (hpp) app.use(hpp());
 
-/* ===================== ZOD HELPERS ===================== */
+/* ===================== ZOD VALIDATOR ===================== */
 function validate(schema, where = "body") {
   return (req, res, next) => {
     try {
@@ -709,12 +529,6 @@ function validate(schema, where = "body") {
       next();
     } catch (err) {
       if (err instanceof ZodError) {
-        logWarn("zod.validation", {
-          rid: req.rid || "-",
-          path: req.originalUrl,
-          issues: err.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
-        });
-
         return res.status(400).json({
           success: false,
           message: "Validation failed",
@@ -732,7 +546,6 @@ const zISODateStr = z.string().refine((v) => !Number.isNaN(new Date(v).getTime()
 
 /* ===================== HEALTH ===================== */
 app.get("/health", (req, res) => res.json({ ok: true, uptime: process.uptime() }));
-
 app.get("/db-test", async (req, res) => {
   try {
     const r = await dbQuery("SELECT NOW() as now");
@@ -742,11 +555,11 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
-/* ===================== SUPABASE STORAGE (PRIVATE BUCKET) ===================== */
+/* ===================== SUPABASE STORAGE ===================== */
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
-const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)); // 7 days default
+const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800));
 
 const supabaseAdmin =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
@@ -772,33 +585,41 @@ function safeKeyPart(str, max = 40) {
 async function toWebpSquareBuffer(buf) {
   return sharp(buf).rotate().resize(1080, 1080, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
 }
+async function toWebpWideBuffer(buf) {
+  return sharp(buf).rotate().resize(2000, 1125, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
+}
 
-async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
+async function uploadKeyToSupabase({ buffer, key, contentType = "image/webp" }) {
   ensureSupabaseReady();
-
-  const base = safeKeyPart(originalName);
-  const key = `products/${productId}/${Date.now()}_${base}.webp`;
-
-  const webpBuf = await toWebpSquareBuffer(buffer);
-
-  const { error: upErr } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, webpBuf, {
-    contentType: "image/webp",
+  const { error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, buffer, {
+    contentType,
     cacheControl: "31536000",
     upsert: false,
   });
-
-  if (upErr) {
-    throw new Error(`Supabase upload failed (bucket=${SUPABASE_BUCKET}, key=${key}): ${upErr.message || "unknown error"}`);
-  }
-
+  if (error) throw new Error(error.message || "Supabase upload failed");
   return { key };
+}
+
+async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
+  ensureSupabaseReady();
+  const base = safeKeyPart(originalName);
+  const key = `products/${productId}/${Date.now()}_${base}.webp`;
+  const webpBuf = await toWebpSquareBuffer(buffer);
+  return uploadKeyToSupabase({ buffer: webpBuf, key });
+}
+
+async function uploadFeaturedImageToSupabase({ buffer, originalName, featuredId }) {
+  ensureSupabaseReady();
+  const base = safeKeyPart(originalName);
+  const key = `featured/${featuredId}/${Date.now()}_${base}.webp`;
+  const webpBuf = await toWebpWideBuffer(buffer);
+  return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
 
 async function signKey(key) {
   ensureSupabaseReady();
   const k = String(key || "").trim();
   if (!k) return "";
-
   const { data, error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
   if (error) throw new Error(error.message || "Signing failed");
   return data?.signedUrl || "";
@@ -811,34 +632,6 @@ async function deleteSupabaseKey(key) {
     if (!k) return;
     await supabaseAdmin.storage.from(SUPABASE_BUCKET).remove([k]);
   } catch {}
-}
-
-function extractImageKey(row) {
-  const payload = row?.payload && typeof row.payload === "object" ? row.payload : {};
-  const k1 = String(payload.__image_key || "").trim();
-  if (k1) return k1;
-
-  const img = String(row?.image_url || "").trim();
-  if (!img) return "";
-
-  if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return "";
-  return img; // treat as key
-}
-
-async function withSignedImage(row) {
-  const r = { ...row };
-  const img = String(row?.image_url || "").trim();
-  if (!img) return r;
-
-  // already a public URL or local upload
-  if (img.startsWith("http://") || img.startsWith("https://") || img.startsWith("/uploads/")) return r;
-
-  try {
-    r.image_url = await signKey(img);
-  } catch {
-    // keep key if signing fails
-  }
-  return r;
 }
 
 /* ===================== MULTER (MEMORY) ===================== */
@@ -855,7 +648,13 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024 },
 });
 
-/* ===================== ADMIN SESSION (COOKIE TOKEN) ===================== */
+// one main image + multiple gallery images
+const uploadProductMedia = upload.fields([
+  { name: "image", maxCount: 1 },   // display image
+  { name: "images", maxCount: 12 }, // gallery images
+]);
+
+/* ===================== ADMIN SESSION (SIGNED COOKIE TOKEN) ===================== */
 function base64url(input) {
   return Buffer.from(input).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
@@ -864,24 +663,15 @@ function unbase64url(input) {
   return Buffer.from(b64, "base64").toString("utf-8");
 }
 function sign(payloadB64) {
-  return crypto
-    .createHmac("sha256", ADMIN_SECRET)
-    .update(payloadB64)
-    .digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+  return crypto.createHmac("sha256", ADMIN_SECRET).update(payloadB64).digest("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 function safeEq(a, b) {
-  // base64url strings
   try {
     const aa = Buffer.from(String(a || ""), "utf8");
     const bb = Buffer.from(String(b || ""), "utf8");
     if (aa.length !== bb.length) return false;
     return crypto.timingSafeEqual(aa, bb);
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 function createToken(payloadObj) {
   const payloadB64 = base64url(JSON.stringify(payloadObj));
@@ -894,19 +684,14 @@ function verifyToken(token) {
   const [payloadB64, sig] = parts;
   const expected = sign(payloadB64);
   if (!safeEq(sig, expected)) return null;
-
   try {
     const payload = JSON.parse(unbase64url(payloadB64));
     if (payload?.exp && Date.now() > payload.exp) return null;
     return payload;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// In-memory allowlist (logout invalidates)
-// ✅ Enforced always: if token jti missing from map => invalid.
-// (This means a server restart logs out admins — safer.)
+// allowlist (restart => logout)
 const adminJtiMap = new Map(); // jti -> expMs
 function cleanupJti() {
   const now = Date.now();
@@ -925,17 +710,13 @@ function requireAdmin(req, res, next) {
   const payload = verifyToken(token);
 
   if (!payload || payload.role !== "admin") {
-    const ip = getClientIp(req);
-    logWarn("security.admin_unauthorized", { rid: req.rid || "-", ip, path: req.originalUrl });
+    logWarn("security.admin_unauthorized", { rid: req.rid || "-", ip: getClientIp(req), path: req.originalUrl });
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }
-
-  // ✅ Enforce allowlist
   if (!payload.jti) return res.status(401).json({ success: false, message: "Session expired" });
+
   const exp = adminJtiMap.get(payload.jti);
-  if (!exp || Date.now() > exp) {
-    return res.status(401).json({ success: false, message: "Session expired" });
-  }
+  if (!exp || Date.now() > exp) return res.status(401).json({ success: false, message: "Session expired" });
 
   req.admin = payload;
   next();
@@ -943,40 +724,34 @@ function requireAdmin(req, res, next) {
 
 function requireCsrf(req, res, next) {
   const method = String(req.method || "").toUpperCase();
-  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return next();
 
   const cookieVal = String(req.cookies?.[CSRF_COOKIE] || "");
   const headerVal = String(req.headers["x-csrf-token"] || "");
 
   if (!cookieVal || !headerVal || cookieVal !== headerVal) {
-    const ip = getClientIp(req);
-    logWarn("security.csrf_block", { rid: req.rid || "-", ip, path: req.originalUrl });
+    logWarn("security.csrf_block", { rid: req.rid || "-", ip: getClientIp(req), path: req.originalUrl });
     return res.status(403).json({ success: false, message: "CSRF blocked" });
   }
   next();
 }
 
-/* ===================== AUTH ZOD ===================== */
+function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString("hex"); }
+
+/* ===================== AUTH ROUTES ===================== */
 const AdminLoginSchema = z.object({
   password: zNonEmpty("Missing password"),
   otp: z.string().trim().optional(),
 });
 
-/* ===================== ADMIN LOGIN ===================== */
-function randomToken(bytes = 32) {
-  return crypto.randomBytes(bytes).toString("hex");
-}
-
 app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, res) => {
   try {
     const ip = getClientIp(req);
 
-    // ✅ In production, don’t allow default secret
     if (IS_PROD && ADMIN_SECRET === "CHANGE_ME_SUPER_SECRET") {
       logError("security.admin_secret_default", { rid: req.rid || "-", ip });
       return res.status(500).json({ success: false, message: "Admin secret not configured" });
     }
-
     if (!ADMIN_PASSWORD_HASH) {
       logError("security.admin_hash_missing", { rid: req.rid || "-", ip });
       return res.status(500).json({ success: false, message: "Admin login not configured" });
@@ -993,19 +768,15 @@ app.post("/admin/login", authLimiter, validate(AdminLoginSchema), async (req, re
 
     if (ADMIN_TOTP_SECRET) {
       if (!otp) return res.status(401).json({ success: false, message: "OTP required" });
-      return res.status(500).json({
-        success: false,
-        message: "2FA secret is set but TOTP verification is not enabled in code (add speakeasy + verify).",
-      });
+      return res.status(500).json({ success: false, message: "TOTP secret is set but verification is not implemented." });
     }
 
-    const exp = Date.now() + 1000 * 60 * 60 * 12; // 12h
+    const exp = Date.now() + 1000 * 60 * 60 * 12;
     const jti = randomToken(16);
     const token = createToken({ role: "admin", iat: Date.now(), exp, jti });
     adminJtiMap.set(jti, exp);
 
     const csrfToken = randomToken(20);
-
     res.cookie(COOKIE_NAME, token, { ...COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
     res.cookie(CSRF_COOKIE, csrfToken, { ...CSRF_COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
 
@@ -1030,12 +801,975 @@ app.get("/admin/me", requireAdmin, (req, res) => {
   res.json({ success: true, admin: req.admin, csrfToken: String(req.cookies?.[CSRF_COOKIE] || "") });
 });
 
-// Optional: rotate CSRF token (no CSRF required)
 app.post("/admin/csrf/rotate", requireAdmin, (req, res) => {
   const csrfToken = randomToken(20);
   res.cookie(CSRF_COOKIE, csrfToken, { ...CSRF_COOKIE_OPTS, maxAge: 1000 * 60 * 60 * 12 });
   res.json({ success: true, csrfToken });
 });
+
+/* ===================== PRODUCT IMAGE MODEL ===================== */
+function getRowPayload(row) {
+  return row?.payload && typeof row.payload === "object" ? row.payload : {};
+}
+
+function normalizeKeyArray(v) {
+  if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(Boolean);
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v);
+      if (Array.isArray(parsed)) return parsed.map(String).map(s => s.trim()).filter(Boolean);
+    } catch {}
+  }
+  return [];
+}
+
+function uniqueArr(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const x of arr) {
+    const s = String(x || "").trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function looksLikeStorageKey(img) {
+  const s = String(img || "").trim();
+  if (!s) return false;
+  if (s.startsWith("http://") || s.startsWith("https://")) return false;
+  if (s.startsWith("/uploads/")) return false;
+  return true;
+}
+
+function extractDisplayKey(row) {
+  const payload = getRowPayload(row);
+  const pKey = String(payload.__image_key || "").trim();
+  if (pKey) return pKey;
+
+  const img = String(row?.image_url || "").trim();
+  if (!img) return "";
+  return looksLikeStorageKey(img) ? img : "";
+}
+
+function getGalleryKeys(row) {
+  const payload = getRowPayload(row);
+  return normalizeKeyArray(payload.__gallery_keys);
+}
+
+function getDetailKey(row) {
+  const payload = getRowPayload(row);
+  const dk = String(payload.__detail_image_key || "").trim();
+  return dk || extractDisplayKey(row) || "";
+}
+
+async function signMany(keys) {
+  const list = normalizeKeyArray(keys);
+  if (!list.length) return [];
+  const urls = await Promise.all(
+    list.map(async (k) => {
+      try { return await signKey(k); } catch { return ""; }
+    })
+  );
+  return urls.filter(Boolean);
+}
+
+async function withSignedProduct(row, { includeKeys = false } = {}) {
+  const payload = getRowPayload(row);
+
+  const displayKey = extractDisplayKey(row);
+  const detailKey = getDetailKey(row);
+  const galleryKeys = getGalleryKeys(row);
+
+  const [displayUrl, detailUrl, galleryUrls] = await Promise.all([
+    displayKey ? signKey(displayKey).catch(() => "") : Promise.resolve(""),
+    detailKey ? signKey(detailKey).catch(() => "") : Promise.resolve(""),
+    signMany(galleryKeys),
+  ]);
+
+  const allKeys = uniqueArr([detailKey, displayKey, ...galleryKeys]);
+  const allUrls = await signMany(allKeys);
+
+  const out = {
+    ...row,
+    payload,
+    image_url: displayUrl || "",
+    detail_image_url: detailUrl || (displayUrl || ""),
+    images: galleryUrls,
+    all_images: allUrls,
+  };
+
+  if (includeKeys) {
+    out.image_key = displayKey || "";
+    out.detail_image_key = detailKey || "";
+    out.images_keys = galleryKeys;
+  }
+
+  return out;
+}
+
+/* ===================== PRODUCTS DB HELPERS ===================== */
+function capsLoadedProducts() { return DB_CAPS.products?.columns && DB_CAPS.products.columns.size > 0; }
+function hasProductCol(c) { return DB_CAPS.products?.columns?.has(c); }
+
+function makeSafeProductId() {
+  const t = String(DB_CAPS.products?.idType || "").toLowerCase();
+  if (t.includes("uuid")) return crypto.randomUUID();
+  if (t.includes("bigint")) return String(Date.now()); // safe for route params
+  if (t.includes("integer") || t.includes("int")) return String(Math.floor(Date.now() / 1000));
+  return String(Date.now());
+}
+
+function buildInsertSQL(table, cols) {
+  const params = cols.map((_, i) => `$${i + 1}`);
+  return `INSERT INTO ${table} (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`;
+}
+
+function isUndefinedColumnErr(e) { return String(e?.code || "") === "42703"; }
+function isNotNullIdErr(e) { return String(e?.code || "") === "23502" && (/column "id"/i.test(String(e?.message || "")) || String(e?.column || "") === "id"); }
+
+async function insertProductRow(client, { id, name, price, description, imageKey, isActive, payload }) {
+  const now = new Date();
+  const candidates = [];
+
+  if (capsLoadedProducts()) {
+    const cols = [];
+    const vals = [];
+
+    const includeId = DB_CAPS.products.idHasDefault === false && hasProductCol("id");
+    if (includeId) { cols.push("id"); vals.push(id); }
+    if (hasProductCol("name")) { cols.push("name"); vals.push(name); }
+    if (hasProductCol("price")) { cols.push("price"); vals.push(price); }
+    if (hasProductCol("description")) { cols.push("description"); vals.push(description || null); }
+    if (hasProductCol("image_url")) { cols.push("image_url"); vals.push(imageKey || null); }
+    if (hasProductCol("is_active")) { cols.push("is_active"); vals.push(isActive); }
+    if (hasProductCol("created_at")) { cols.push("created_at"); vals.push(now); }
+    if (hasProductCol("updated_at")) { cols.push("updated_at"); vals.push(now); }
+    if (hasProductCol("payload")) { cols.push("payload"); vals.push(payload || {}); }
+
+    if (cols.length >= 2) candidates.push({ sql: buildInsertSQL("products", cols), vals });
+  }
+
+  const baseNoId = [
+    { cols: ["name","price","description","image_url","is_active","created_at","updated_at"], vals: [name, price, description || null, imageKey || null, isActive, now, now] },
+    { cols: ["name","price","description","image_url","is_active"], vals: [name, price, description || null, imageKey || null, isActive] },
+    { cols: ["name","price","description","image_url"], vals: [name, price, description || null, imageKey || null] },
+    { cols: ["name","price","description"], vals: [name, price, description || null] },
+    { cols: ["name","price"], vals: [name, price] },
+  ];
+  const baseWithId = [
+    { cols: ["id","name","price","description","image_url","is_active","created_at","updated_at"], vals: [id, name, price, description || null, imageKey || null, isActive, now, now] },
+    { cols: ["id","name","price","description","image_url","is_active"], vals: [id, name, price, description || null, imageKey || null, isActive] },
+    { cols: ["id","name","price"], vals: [id, name, price] },
+  ];
+  for (const c of baseNoId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
+  for (const c of baseWithId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
+
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      const r = await client.query(cand.sql, cand.vals);
+      if (r.rows?.[0]) return r.rows[0];
+    } catch (e) {
+      lastErr = e;
+      if (isUndefinedColumnErr(e) || isNotNullIdErr(e)) continue;
+      continue;
+    }
+  }
+  throw lastErr || new Error("Insert failed");
+}
+
+async function updateProductRow(client, id, { name, price, description, imageKey, isActive, payloadMerged }) {
+  if (capsLoadedProducts()) {
+    const sets = [];
+    const vals = [];
+    let i = 0;
+
+    if (hasProductCol("name") && name !== undefined) { sets.push(`name=$${++i}`); vals.push(name); }
+    if (hasProductCol("price") && price !== undefined) { sets.push(`price=$${++i}`); vals.push(price); }
+    if (hasProductCol("description") && description !== undefined) { sets.push(`description=$${++i}`); vals.push(description || null); }
+    if (hasProductCol("image_url") && imageKey !== undefined) { sets.push(`image_url=$${++i}`); vals.push(imageKey || null); }
+    if (hasProductCol("is_active") && isActive !== undefined) { sets.push(`is_active=$${++i}`); vals.push(isActive); }
+    if (hasProductCol("payload") && payloadMerged !== undefined) { sets.push(`payload=$${++i}`); vals.push(payloadMerged || {}); }
+    if (hasProductCol("updated_at")) { sets.push(`updated_at=NOW()`); }
+
+    if (!sets.length) throw new Error("No updatable columns found on products table");
+    vals.push(id);
+    const sql = `UPDATE products SET ${sets.join(", ")} WHERE id=$${++i} RETURNING *`;
+    const r = await client.query(sql, vals);
+    return r.rows?.[0] || null;
+  }
+
+  const candidates = [
+    {
+      sql: `UPDATE products
+            SET image_url=$1, payload=$2, updated_at=NOW()
+            WHERE id=$3 RETURNING *`,
+      vals: [imageKey || null, payloadMerged || {}, id],
+    },
+    {
+      sql: `UPDATE products
+            SET image_url=$1
+            WHERE id=$2 RETURNING *`,
+      vals: [imageKey || null, id],
+    },
+  ];
+
+  let lastErr = null;
+  for (const cand of candidates) {
+    try {
+      const r = await client.query(cand.sql, cand.vals);
+      if (r.rows?.[0]) return r.rows[0];
+      return null;
+    } catch (e) {
+      lastErr = e;
+      if (isUndefinedColumnErr(e)) continue;
+      continue;
+    }
+  }
+  throw lastErr || new Error("Update failed");
+}
+
+/* ===================== MEDIA LIST (ADMIN) ===================== */
+app.get("/admin/media/list", requireAdmin, async (req, res) => {
+  try {
+    ensureSupabaseReady();
+
+    const prefix = String(req.query.prefix || "").trim();
+    const search = String(req.query.search || "").trim();
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 60)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+
+    const folder = prefix.replace(/^\/+/, "").replace(/^\.\.+/g, "");
+    const { data, error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).list(folder, {
+      limit,
+      offset,
+      search: search || undefined,
+    });
+    if (error) throw new Error(error.message || "List failed");
+
+    const items = Array.isArray(data) ? data : [];
+    const out = await Promise.all(items.map(async (it) => {
+      const key = folder ? `${folder.replace(/\/+$/, "")}/${it.name}` : it.name;
+      let signedUrl = "";
+      try { signedUrl = await signKey(key); } catch {}
+      return { name: it.name, key, updated_at: it.updated_at || null, metadata: it.metadata || {}, signedUrl };
+    }));
+
+    return res.json({ success: true, items: out, prefix: folder, offset, limit });
+  } catch (e) {
+    logError("media.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ success: false, items: [] });
+  }
+});
+
+/* ===================== PRODUCTS (PUBLIC) ===================== */
+app.get("/api/products", async (req, res) => {
+  try {
+    await ensureCapsLoaded("products");
+    const includeAll = String(req.query.all || "").toLowerCase() === "true";
+
+    const sql = includeAll
+      ? `SELECT * FROM products ORDER BY created_at DESC`
+      : `SELECT * FROM products WHERE is_active=true ORDER BY created_at DESC`;
+
+    const out = await dbQuery(sql);
+    const rows = await Promise.all(out.rows.map((r) => withSignedProduct(r, { includeKeys: false })));
+    res.json(rows);
+  } catch (e) {
+    logError("products.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.json([]);
+  }
+});
+
+const ProductIdParamSchema = z.object({ id: z.string().trim().min(1, "Missing id") });
+
+app.get("/api/products/:id", validate(ProductIdParamSchema, "params"), async (req, res) => {
+  try {
+    await ensureCapsLoaded("products");
+    const id = String(req.params.id);
+
+    const out = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+    if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+    const p = out.rows[0];
+    if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
+
+    const signed = await withSignedProduct(p, { includeKeys: false });
+    res.json({ success: true, product: signed });
+  } catch (e) {
+    logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+/* ===================== PRODUCTS (ADMIN) ===================== */
+app.get("/admin/products", requireAdmin, async (req, res) => {
+  try {
+    await ensureCapsLoaded("products");
+    const out = await dbQuery(`SELECT * FROM products ORDER BY created_at DESC`);
+    const rows = await Promise.all(out.rows.map((r) => withSignedProduct(r, { includeKeys: true })));
+    res.json({ success: true, products: rows });
+  } catch (e) {
+    logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    res.status(500).json({ success: false, products: [] });
+  }
+});
+
+const CreateProductSchema = z.object({
+  name: zNonEmpty("Missing name").max(200, "Name too long"),
+  price: z.coerce.number().min(0, "Invalid price").default(0),
+  description: z.string().trim().max(5000, "Description too long").optional().default(""),
+  is_active: z.string().optional(),
+}).passthrough();
+
+const UpdateProductSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  price: z.coerce.number().min(0).optional(),
+  description: z.string().trim().max(5000).optional(),
+  is_active: z.string().optional(),
+  remove_image: z.string().optional(), // remove display image
+}).passthrough();
+
+// CREATE: accepts image (display) + images[] (gallery)
+app.post("/admin/products", writeLimiter, requireAdmin, requireCsrf, uploadProductMedia, validate(CreateProductSchema), async (req, res) => {
+  let uploadedDisplayKey = "";
+  let uploadedGalleryKeys = [];
+
+  try {
+    await ensureCapsLoaded("products");
+
+    const name = String(req.body.name || "").trim();
+    const price = Math.max(0, Math.round(Number(req.body.price || 0)));
+    const description = String(req.body.description || "").trim();
+    const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
+
+    const payloadIn = { ...req.body };
+
+    const mainFile = req.files?.image?.[0] || null;
+    const galleryFiles = Array.isArray(req.files?.images) ? req.files.images : [];
+
+    const createdRow = await withDbClient(async (client) => {
+      await client.query("BEGIN");
+      try {
+        const id = makeSafeProductId();
+
+        const basePayload = {
+          ...payloadIn,
+          __gallery_keys: [],
+          __detail_image_key: "",
+          __image_key: "",
+        };
+
+        let row = await insertProductRow(client, {
+          id,
+          name,
+          price,
+          description,
+          imageKey: null,
+          isActive,
+          payload: basePayload,
+        });
+
+        // upload display image
+        if (mainFile?.buffer) {
+          const up = await uploadProductImageToSupabase({
+            buffer: mainFile.buffer,
+            originalName: mainFile.originalname,
+            productId: row.id,
+          });
+          uploadedDisplayKey = up.key;
+        }
+
+        // upload gallery images
+        const newGalleryKeys = [];
+        for (const f of galleryFiles) {
+          if (!f?.buffer) continue;
+          const up = await uploadProductImageToSupabase({
+            buffer: f.buffer,
+            originalName: f.originalname,
+            productId: row.id,
+          });
+          newGalleryKeys.push(up.key);
+        }
+        uploadedGalleryKeys = uploadedGalleryKeys.concat(newGalleryKeys);
+
+        // If no display uploaded, pick first gallery as display
+        let displayKey = uploadedDisplayKey;
+        let galleryKeys = newGalleryKeys;
+
+        if (!displayKey && galleryKeys.length) {
+          displayKey = galleryKeys[0];
+          galleryKeys = galleryKeys.slice(1); // avoid duplication
+        }
+
+        const detailKey = displayKey || "";
+
+        const mergedPayload = {
+          ...basePayload,
+          __image_key: displayKey || "",
+          __gallery_keys: galleryKeys,
+          __detail_image_key: detailKey || "",
+        };
+
+        row = await updateProductRow(client, row.id, {
+          imageKey: displayKey || null,
+          payloadMerged: mergedPayload,
+          name,
+          price,
+          description,
+          isActive,
+        });
+
+        await client.query("COMMIT");
+        return row;
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      }
+    });
+
+    const signed = await withSignedProduct(createdRow, { includeKeys: true });
+    return res.json({ success: true, product: signed });
+  } catch (e) {
+    if (uploadedDisplayKey) await deleteSupabaseKey(uploadedDisplayKey);
+    for (const k of uploadedGalleryKeys) await deleteSupabaseKey(k);
+
+    logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+    return res.status(500).json({ success: false, message: IS_PROD ? "Create product failed" : `Create product failed: ${String(e?.message || e)}` });
+  }
+});
+
+// UPDATE: accepts optional new display image (image) + append gallery (images[])
+app.put(
+  "/admin/products/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  uploadProductMedia,
+  validate(ProductIdParamSchema, "params"),
+  validate(UpdateProductSchema),
+  async (req, res) => {
+    let newDisplayKey = "";
+    let appendedGalleryKeys = [];
+
+    try {
+      await ensureCapsLoaded("products");
+      const id = String(req.params.id);
+
+      const mainFile = req.files?.image?.[0] || null;
+      const galleryFiles = Array.isArray(req.files?.images) ? req.files.images : [];
+
+      const updatedRow = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        try {
+          const cur = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+          if (!cur.rows.length) { await client.query("ROLLBACK"); return null; }
+          const existing = cur.rows[0];
+
+          const existingPayload = getRowPayload(existing);
+          const existingDisplayKey = extractDisplayKey(existing);
+          const existingDetailKey = getDetailKey(existing);
+          const existingGalleryKeys = getGalleryKeys(existing);
+
+          const name = req.body?.name === undefined ? String(existing.name || "").trim() : String(req.body.name || "").trim();
+          const price = req.body?.price === undefined ? Math.max(0, Math.round(Number(existing.price || 0))) : Math.max(0, Math.round(Number(req.body.price)));
+          const description = req.body?.description === undefined ? String(existing.description || "").trim() : String(req.body.description || "").trim();
+          const isActive = req.body?.is_active === undefined ? Boolean(existing.is_active) : String(req.body.is_active).toLowerCase() !== "false";
+
+          const removeDisplay = String(req.body?.remove_image || "").toLowerCase() === "true";
+
+          let displayKey = existingDisplayKey;
+          let detailKey = existingDetailKey;
+          let galleryKeys = existingGalleryKeys.slice();
+
+          // Remove display
+          if (removeDisplay && displayKey) {
+            await deleteSupabaseKey(displayKey);
+            displayKey = "";
+            if (detailKey === existingDisplayKey) detailKey = "";
+          }
+
+          // New display uploaded?
+          if (mainFile?.buffer) {
+            const up = await uploadProductImageToSupabase({
+              buffer: mainFile.buffer,
+              originalName: mainFile.originalname,
+              productId: id,
+            });
+            newDisplayKey = up.key;
+
+            // ✅ Keep old display by moving it into gallery (DO NOT delete it)
+            if (displayKey && displayKey !== newDisplayKey) {
+              if (!galleryKeys.includes(displayKey)) galleryKeys.unshift(displayKey);
+            }
+            displayKey = newDisplayKey;
+          }
+
+          // Append new gallery uploads
+          const newKeys = [];
+          for (const f of galleryFiles) {
+            if (!f?.buffer) continue;
+            const up = await uploadProductImageToSupabase({
+              buffer: f.buffer,
+              originalName: f.originalname,
+              productId: id,
+            });
+            newKeys.push(up.key);
+          }
+          appendedGalleryKeys = appendedGalleryKeys.concat(newKeys);
+
+          if (newKeys.length) {
+            for (const k of newKeys) {
+              if (k !== displayKey && !galleryKeys.includes(k)) galleryKeys.push(k);
+            }
+          }
+
+          // Ensure detailKey valid; default to displayKey
+          const validKeys = new Set(uniqueArr([displayKey, ...galleryKeys]));
+          if (!detailKey || !validKeys.has(detailKey)) detailKey = displayKey || "";
+
+          const payloadMerged = {
+            ...existingPayload,
+            ...req.body,
+            __image_key: displayKey || "",
+            __gallery_keys: galleryKeys,
+            __detail_image_key: detailKey || "",
+          };
+
+          const row = await updateProductRow(client, id, {
+            name,
+            price,
+            description,
+            imageKey: displayKey || null,
+            isActive,
+            payloadMerged,
+          });
+
+          await client.query("COMMIT");
+          return row;
+        } catch (err) {
+          await client.query("ROLLBACK");
+          throw err;
+        }
+      });
+
+      if (!updatedRow) return res.status(404).json({ success: false, message: "Product not found" });
+
+      const signed = await withSignedProduct(updatedRow, { includeKeys: true });
+      return res.json({ success: true, product: signed });
+    } catch (e) {
+      // Cleanup only the NEW uploads if anything failed
+      if (newDisplayKey) await deleteSupabaseKey(newDisplayKey);
+      for (const k of appendedGalleryKeys) await deleteSupabaseKey(k);
+
+      logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: IS_PROD ? "Update product failed" : `Update product failed: ${String(e?.message || e)}` });
+    }
+  }
+);
+
+/* ===================== SELECT WHICH IMAGE SHOWS WHERE ===================== */
+const SetImageKeySchema = z.object({ key: zNonEmpty("Missing key").max(500) });
+
+// Set DISPLAY image (products page)
+app.post(
+  "/admin/products/:id/display-image",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(ProductIdParamSchema, "params"),
+  validate(SetImageKeySchema),
+  async (req, res) => {
+    try {
+      await ensureCapsLoaded("products");
+      const id = String(req.params.id);
+      const chosen = String(req.body.key || "").trim();
+
+      const updated = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        const cur = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+        if (!cur.rows.length) { await client.query("ROLLBACK"); return null; }
+        const row = cur.rows[0];
+
+        const payload = getRowPayload(row);
+        const oldDisplay = extractDisplayKey(row);
+        const detailKey = getDetailKey(row);
+        const gallery = getGalleryKeys(row);
+
+        const valid = new Set(uniqueArr([oldDisplay, ...gallery]));
+        if (!valid.has(chosen)) {
+          await client.query("ROLLBACK");
+          return { err: "Key not found on this product" };
+        }
+
+        // remove chosen from gallery; move old display into gallery
+        let nextGallery = gallery.filter((k) => k !== chosen);
+        if (oldDisplay && oldDisplay !== chosen && !nextGallery.includes(oldDisplay)) nextGallery.unshift(oldDisplay);
+
+        // keep existing detail if valid; else default to chosen
+        let nextDetail = detailKey || "";
+        const nextValid = new Set(uniqueArr([chosen, ...nextGallery]));
+        if (!nextDetail || !nextValid.has(nextDetail)) nextDetail = chosen;
+
+        const merged = {
+          ...payload,
+          __image_key: chosen,
+          __gallery_keys: nextGallery,
+          __detail_image_key: nextDetail,
+        };
+
+        const upd = await updateProductRow(client, id, {
+          imageKey: chosen,
+          payloadMerged: merged,
+        });
+
+        await client.query("COMMIT");
+        return upd;
+      });
+
+      if (!updated) return res.status(404).json({ success: false, message: "Product not found" });
+      if (updated.err) return res.status(400).json({ success: false, message: updated.err });
+
+      const signed = await withSignedProduct(updated, { includeKeys: true });
+      return res.json({ success: true, product: signed });
+    } catch (e) {
+      logError("products.set_display_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Failed to set display image" });
+    }
+  }
+);
+
+// Set DETAIL image (product-details hero)
+app.post(
+  "/admin/products/:id/detail-image",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(ProductIdParamSchema, "params"),
+  validate(SetImageKeySchema),
+  async (req, res) => {
+    try {
+      await ensureCapsLoaded("products");
+      const id = String(req.params.id);
+      const chosen = String(req.body.key || "").trim();
+
+      const updated = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        const cur = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+        if (!cur.rows.length) { await client.query("ROLLBACK"); return null; }
+        const row = cur.rows[0];
+
+        const payload = getRowPayload(row);
+        const displayKey = extractDisplayKey(row);
+        const gallery = getGalleryKeys(row);
+
+        const valid = new Set(uniqueArr([displayKey, ...gallery]));
+        if (!valid.has(chosen)) {
+          await client.query("ROLLBACK");
+          return { err: "Key not found on this product" };
+        }
+
+        const merged = { ...payload, __detail_image_key: chosen };
+        const upd = await updateProductRow(client, id, { payloadMerged: merged });
+
+        await client.query("COMMIT");
+        return upd;
+      });
+
+      if (!updated) return res.status(404).json({ success: false, message: "Product not found" });
+      if (updated.err) return res.status(400).json({ success: false, message: updated.err });
+
+      const signed = await withSignedProduct(updated, { includeKeys: true });
+      return res.json({ success: true, product: signed });
+    } catch (e) {
+      logError("products.set_detail_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Failed to set detail image" });
+    }
+  }
+);
+
+// Remove ONE gallery image (does NOT remove display here)
+app.post(
+  "/admin/products/:id/images/remove",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(ProductIdParamSchema, "params"),
+  validate(SetImageKeySchema),
+  async (req, res) => {
+    try {
+      await ensureCapsLoaded("products");
+      const id = String(req.params.id);
+      const key = String(req.body.key || "").trim();
+
+      const updated = await withDbClient(async (client) => {
+        await client.query("BEGIN");
+        const cur = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+        if (!cur.rows.length) { await client.query("ROLLBACK"); return null; }
+        const row = cur.rows[0];
+
+        const payload = getRowPayload(row);
+        const displayKey = extractDisplayKey(row);
+
+        if (key === displayKey) {
+          await client.query("ROLLBACK");
+          return { err: "This is the DISPLAY image. Set another display first or use remove_image." };
+        }
+
+        const gallery = getGalleryKeys(row);
+        const nextGallery = gallery.filter((k) => k !== key);
+
+        await deleteSupabaseKey(key);
+
+        let detailKey = getDetailKey(row);
+        const valid = new Set(uniqueArr([displayKey, ...nextGallery]));
+        if (!detailKey || !valid.has(detailKey)) detailKey = displayKey || "";
+
+        const merged = {
+          ...payload,
+          __gallery_keys: nextGallery,
+          __detail_image_key: detailKey,
+          __image_key: displayKey || "",
+        };
+
+        const upd = await updateProductRow(client, id, { payloadMerged: merged });
+        await client.query("COMMIT");
+        return upd;
+      });
+
+      if (!updated) return res.status(404).json({ success: false, message: "Product not found" });
+      if (updated.err) return res.status(400).json({ success: false, message: updated.err });
+
+      const signed = await withSignedProduct(updated, { includeKeys: true });
+      return res.json({ success: true, product: signed });
+    } catch (e) {
+      logError("products.gallery_remove_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Failed to remove image" });
+    }
+  }
+);
+
+// Delete product (deletes display + gallery + detail if unique)
+app.delete(
+  "/admin/products/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(ProductIdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      await ensureCapsLoaded("products");
+      const id = String(req.params.id);
+
+      const cur = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
+      if (!cur.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+      const row = cur.rows[0];
+      const displayKey = extractDisplayKey(row);
+      const detailKey = getDetailKey(row);
+      const gallery = getGalleryKeys(row);
+
+      const keysToDelete = uniqueArr([displayKey, detailKey, ...gallery]);
+      for (const k of keysToDelete) await deleteSupabaseKey(k);
+
+      const out = await dbQuery(`DELETE FROM products WHERE id=$1 RETURNING id`, [id]);
+      if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
+
+      res.json({ success: true });
+    } catch (e) {
+      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ success: false, message: "Delete failed" });
+    }
+  }
+);
+
+/* ===================== FEATURED IMAGES (HOMEPAGE) ===================== */
+async function withSignedFeatured(row, { includeKeys = false } = {}) {
+  const r = { ...row };
+  const key = String(row?.image_key || "").trim();
+  r.image_url = "";
+  if (key) {
+    try { r.image_url = await signKey(key); } catch { r.image_url = ""; }
+  }
+  if (includeKeys) r.image_key = key;
+  return r;
+}
+
+const FeaturedIdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
+
+const FeaturedCreateSchema = z.object({
+  title: z.string().trim().max(140).optional().default(""),
+  link_url: z.string().trim().max(500).optional().default(""),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional().default(0),
+  is_active: z.string().optional(),
+}).passthrough();
+
+const FeaturedUpdateSchema = z.object({
+  title: z.string().trim().max(140).optional(),
+  link_url: z.string().trim().max(500).optional(),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional(),
+  is_active: z.string().optional(),
+  remove_image: z.string().optional(),
+}).passthrough();
+
+// PUBLIC
+app.get("/api/featured", async (req, res) => {
+  try {
+    const r = await dbQuery(
+      `SELECT * FROM homepage_featured
+       WHERE is_active=true
+       ORDER BY sort_order ASC, updated_at DESC`
+    );
+    const items = await Promise.all(r.rows.map((x) => withSignedFeatured(x, { includeKeys: false })));
+    return res.json({ ok: true, items });
+  } catch (e) {
+    logError("featured.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.json({ ok: true, items: [] });
+  }
+});
+
+// ADMIN list
+app.get("/admin/featured", requireAdmin, async (req, res) => {
+  try {
+    const r = await dbQuery(`SELECT * FROM homepage_featured ORDER BY sort_order ASC, updated_at DESC`);
+    const items = await Promise.all(r.rows.map((x) => withSignedFeatured(x, { includeKeys: true })));
+    return res.json({ success: true, items });
+  } catch (e) {
+    logError("featured.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ success: false, items: [] });
+  }
+});
+
+// ADMIN create (multipart: image)
+app.post("/admin/featured", writeLimiter, requireAdmin, requireCsrf, upload.single("image"), validate(FeaturedCreateSchema), async (req, res) => {
+  let uploadedKey = "";
+  try {
+    const title = String(req.body.title || "").trim();
+    const linkUrl = String(req.body.link_url || "").trim();
+    const sortOrder = Math.max(0, Math.round(Number(req.body.sort_order || 0)));
+    const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
+    const payload = { ...req.body };
+
+    const ins = await dbQuery(
+      `INSERT INTO homepage_featured (title, link_url, sort_order, is_active, payload)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING *`,
+      [title, linkUrl, sortOrder, isActive, payload]
+    );
+
+    let row = ins.rows[0];
+
+    if (req.file?.buffer) {
+      const up = await uploadFeaturedImageToSupabase({
+        buffer: req.file.buffer,
+        originalName: req.file.originalname,
+        featuredId: row.id,
+      });
+      uploadedKey = up.key;
+
+      const upd = await dbQuery(
+        `UPDATE homepage_featured
+         SET image_key=$1, updated_at=NOW(), payload=$2
+         WHERE id=$3
+         RETURNING *`,
+        [uploadedKey, { ...payload, __image_key: uploadedKey }, row.id]
+      );
+
+      row = upd.rows[0] || row;
+    }
+
+    const signed = await withSignedFeatured(row, { includeKeys: true });
+    return res.json({ success: true, item: signed });
+  } catch (e) {
+    if (uploadedKey) await deleteSupabaseKey(uploadedKey);
+    logError("featured.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+    return res.status(500).json({ success: false, message: "Create featured failed" });
+  }
+});
+
+// ADMIN update (optional new image)
+app.put(
+  "/admin/featured/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  upload.single("image"),
+  validate(FeaturedIdParamSchema, "params"),
+  validate(FeaturedUpdateSchema),
+  async (req, res) => {
+    let newKey = "";
+    try {
+      const id = Number(req.params.id);
+      const cur = await dbQuery(`SELECT * FROM homepage_featured WHERE id=$1 LIMIT 1`, [id]);
+      if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
+
+      const existing = cur.rows[0];
+      const title = req.body.title === undefined ? String(existing.title || "") : String(req.body.title || "");
+      const linkUrl = req.body.link_url === undefined ? String(existing.link_url || "") : String(req.body.link_url || "");
+      const sortOrder = req.body.sort_order === undefined ? Number(existing.sort_order || 0) : Math.max(0, Math.round(Number(req.body.sort_order)));
+      const isActive = req.body.is_active === undefined ? Boolean(existing.is_active) : String(req.body.is_active).toLowerCase() !== "false";
+
+      let imageKey = String(existing.image_key || "").trim();
+      const payload = existing.payload && typeof existing.payload === "object" ? { ...existing.payload, ...req.body } : { ...req.body };
+
+      const removeImage = String(req.body.remove_image || "").toLowerCase() === "true";
+      if (removeImage && imageKey) { await deleteSupabaseKey(imageKey); imageKey = ""; }
+
+      if (req.file?.buffer) {
+        const up = await uploadFeaturedImageToSupabase({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+          featuredId: id,
+        });
+        newKey = up.key;
+        if (imageKey) await deleteSupabaseKey(imageKey);
+        imageKey = newKey;
+      }
+
+      const upd = await dbQuery(
+        `UPDATE homepage_featured
+         SET title=$1, link_url=$2, sort_order=$3, is_active=$4, image_key=$5, updated_at=NOW(), payload=$6
+         WHERE id=$7
+         RETURNING *`,
+        [title, linkUrl, sortOrder, isActive, imageKey || null, payload, id]
+      );
+
+      const signed = await withSignedFeatured(upd.rows[0], { includeKeys: true });
+      return res.json({ success: true, item: signed });
+    } catch (e) {
+      if (newKey) await deleteSupabaseKey(newKey);
+      logError("featured.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Update featured failed" });
+    }
+  }
+);
+
+// ADMIN delete
+app.delete(
+  "/admin/featured/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(FeaturedIdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const cur = await dbQuery(`SELECT * FROM homepage_featured WHERE id=$1 LIMIT 1`, [id]);
+      if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
+
+      const key = String(cur.rows[0].image_key || "").trim();
+      if (key) await deleteSupabaseKey(key);
+
+      await dbQuery(`DELETE FROM homepage_featured WHERE id=$1`, [id]);
+      return res.json({ success: true });
+    } catch (e) {
+      logError("featured.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, message: "Delete failed" });
+    }
+  }
+);
 
 /* ===================== DELIVERY PRICING ===================== */
 const DeliveryPricingSchema = z.object({
@@ -1203,61 +1937,43 @@ app.post(
   }
 );
 
-/* ===================== ORDERS (PUBLIC RECEIPT + CREATE + ADMIN) ===================== */
+/* ===================== ORDERS (PUBLIC + ADMIN) ===================== */
 const IdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
-const OrderStatusSchema = z.object({ status: zNonEmpty("Missing status").max(40, "Status too long") });
 
-const CartItemSchema = z
-  .object({
-    id: z.union([z.string(), z.number()]).optional(),
-    name: zNonEmpty("Item name required").max(250),
-    price: z.coerce.number().min(0),
-    qty: z.coerce.number().int().min(1),
-    image: z.string().optional().nullable(),
-    total: z.coerce.number().min(0).optional(),
-  })
-  .passthrough();
+const CartItemSchema = z.object({
+  id: z.union([z.string(), z.number()]).optional(),
+  name: zNonEmpty("Item name required").max(250),
+  price: z.coerce.number().min(0),
+  qty: z.coerce.number().int().min(1),
+  image: z.string().optional().nullable(),
+  total: z.coerce.number().min(0).optional(),
+}).passthrough();
 
-const OrdersSchema = z
-  .object({
-    reference: zNonEmpty("Missing reference").max(200),
-    name: zNonEmpty("Missing name").max(120),
-    email: zEmail,
-    phone: zNonEmpty("Missing phone").max(30),
-    shippingType: z.enum(["pickup", "delivery"]),
-    state: z.string().optional().default(""),
-    city: z.string().optional().default(""),
-    address: z.string().optional().default(""),
-    cart: z.array(CartItemSchema).min(1, "Cart is empty"),
-    subtotal: z.coerce.number().min(0),
-    deliveryFee: z.coerce.number().min(0),
-    total: z.coerce.number().min(0),
-    status: z.string().optional().default("Pending"),
-    paystackRef: z.string().optional().default(""),
-    createdAt: zISODateStr,
-    paidAt: z.string().optional(),
-    amountPaid: z.coerce.number().optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.shippingType === "delivery") {
-      if (!String(data.state || "").trim()) ctx.addIssue({ code: "custom", path: ["state"], message: "State is required for delivery" });
-      if (!String(data.city || "").trim()) ctx.addIssue({ code: "custom", path: ["city"], message: "City/LGA is required for delivery" });
-      if (!String(data.address || "").trim()) ctx.addIssue({ code: "custom", path: ["address"], message: "Address is required for delivery" });
-    }
-
-    const computedSubtotal = (data.cart || []).reduce(
-      (sum, it) => sum + Number(it.price || 0) * Number(it.qty || 0),
-      0
-    );
-    if (Math.abs(Number(data.subtotal || 0) - computedSubtotal) > 2) {
-      ctx.addIssue({ code: "custom", path: ["subtotal"], message: "Subtotal mismatch" });
-    }
-
-    const computedTotal = computedSubtotal + Number(data.deliveryFee || 0);
-    if (Math.abs(Number(data.total || 0) - computedTotal) > 2) {
-      ctx.addIssue({ code: "custom", path: ["total"], message: "Total mismatch" });
-    }
-  });
+const OrdersSchema = z.object({
+  reference: zNonEmpty("Missing reference").max(200),
+  name: zNonEmpty("Missing name").max(120),
+  email: zEmail,
+  phone: zNonEmpty("Missing phone").max(30),
+  shippingType: z.enum(["pickup", "delivery"]),
+  state: z.string().optional().default(""),
+  city: z.string().optional().default(""),
+  address: z.string().optional().default(""),
+  cart: z.array(CartItemSchema).min(1, "Cart is empty"),
+  subtotal: z.coerce.number().min(0),
+  deliveryFee: z.coerce.number().min(0),
+  total: z.coerce.number().min(0),
+  status: z.string().optional().default("Pending"),
+  paystackRef: z.string().optional().default(""),
+  createdAt: zISODateStr,
+  paidAt: z.string().optional(),
+  amountPaid: z.coerce.number().optional(),
+}).superRefine((data, ctx) => {
+  if (data.shippingType === "delivery") {
+    if (!String(data.state || "").trim()) ctx.addIssue({ code: "custom", path: ["state"], message: "State is required for delivery" });
+    if (!String(data.city || "").trim()) ctx.addIssue({ code: "custom", path: ["city"], message: "City/LGA is required for delivery" });
+    if (!String(data.address || "").trim()) ctx.addIssue({ code: "custom", path: ["address"], message: "Address is required for delivery" });
+  }
+});
 
 async function insertOrderIdempotent(reference, status, payload) {
   const ins = await dbQuery(
@@ -1267,14 +1983,11 @@ async function insertOrderIdempotent(reference, status, payload) {
      RETURNING *`,
     [reference, status, payload]
   );
-
   if (ins.rows.length) return ins.rows[0];
-
   const sel = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
   return sel.rows[0] || null;
 }
 
-// Public order receipt
 app.get("/orders/public/:reference", async (req, res) => {
   try {
     const ref = String(req.params.reference || "").trim();
@@ -1286,33 +1999,33 @@ app.get("/orders/public/:reference", async (req, res) => {
     const row = r.rows[0];
     const payload = row.payload && typeof row.payload === "object" ? row.payload : {};
 
-    const safe = {
-      reference: row.reference,
-      status: String(row.status || payload.status || "Pending"),
-      name: payload.name || "",
-      email: payload.email || "",
-      phone: payload.phone || "",
-      shippingType: payload.shippingType || "",
-      state: payload.state || "",
-      city: payload.city || "",
-      address: payload.address || "",
-      cart: Array.isArray(payload.cart) ? payload.cart : [],
-      subtotal: Number(payload.subtotal || 0),
-      deliveryFee: Number(payload.deliveryFee || 0),
-      total: Number(payload.total || 0),
-      createdAt: payload.createdAt || (row.created_at ? new Date(row.created_at).toISOString() : null),
-      paidAt: payload.paidAt || null,
-      amountPaid: payload.amountPaid || null,
-    };
-
-    return res.json({ ok: true, order: safe });
+    return res.json({
+      ok: true,
+      order: {
+        reference: row.reference,
+        status: String(row.status || payload.status || "Pending"),
+        name: payload.name || "",
+        email: payload.email || "",
+        phone: payload.phone || "",
+        shippingType: payload.shippingType || "",
+        state: payload.state || "",
+        city: payload.city || "",
+        address: payload.address || "",
+        cart: Array.isArray(payload.cart) ? payload.cart : [],
+        subtotal: Number(payload.subtotal || 0),
+        deliveryFee: Number(payload.deliveryFee || 0),
+        total: Number(payload.total || 0),
+        createdAt: payload.createdAt || (row.created_at ? new Date(row.created_at).toISOString() : null),
+        paidAt: payload.paidAt || null,
+        amountPaid: payload.amountPaid || null,
+      },
+    });
   } catch (e) {
     logError("orders.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
     return res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
-// Create pending order
 app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
   try {
     const payload = req.body;
@@ -1328,10 +2041,22 @@ app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
   }
 });
 
-// Legacy alias
-app.post("/order", (req, res) => {
-  req.url = "/orders";
-  app._router.handle(req, res);
+// Aliases (avoid 404 noise if frontend calls these)
+app.get("/admin/orders", requireAdmin, async (req, res) => {
+  try {
+    const out = await dbQuery(`SELECT * FROM orders ORDER BY created_at DESC`);
+    res.json(out.rows);
+  } catch {
+    res.status(500).json([]);
+  }
+});
+app.get("/admin/orders/list", requireAdmin, async (req, res) => {
+  try {
+    const out = await dbQuery(`SELECT * FROM orders ORDER BY created_at DESC`);
+    res.json(out.rows);
+  } catch {
+    res.status(500).json([]);
+  }
 });
 
 const VerifyPaystackSchema = z.object({
@@ -1341,26 +2066,18 @@ const VerifyPaystackSchema = z.object({
 
 app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchema), async (req, res) => {
   try {
-    const ip = getClientIp(req);
     const { reference, expectedAmount } = req.body;
-
     const verify = await verifyPaystack(reference);
 
     const ok = Boolean(verify?.status) && verify?.data?.status === "success";
-    if (!ok) {
-      logWarn("security.paystack_verify_failed", { rid: req.rid || "-", ip, reference });
-      return res.status(400).json({ success: false, message: "Payment not verified" });
-    }
+    if (!ok) return res.status(400).json({ success: false, message: "Payment not verified" });
 
     const paidKobo = Number(verify?.data?.amount || 0);
     const paidNaira = Math.round(paidKobo / 100);
 
     if (expectedAmount !== undefined && Number.isFinite(Number(expectedAmount))) {
       const exp = Math.round(Number(expectedAmount));
-      if (Math.abs(exp - paidNaira) > 2) {
-        logWarn("security.paystack_amount_mismatch", { rid: req.rid || "-", ip, reference, expectedAmount: exp, paidNaira });
-        return res.status(400).json({ success: false, message: "Amount mismatch" });
-      }
+      if (Math.abs(exp - paidNaira) > 2) return res.status(400).json({ success: false, message: "Amount mismatch" });
     }
 
     const existing = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
@@ -1373,9 +2090,7 @@ app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchem
         paidAt: new Date().toISOString(),
         amountPaid: paidNaira,
         paystackTransactionId: verify?.data?.id ?? null,
-        note: "Created via verify endpoint (order not previously posted)",
       };
-
       const created = await insertOrderIdempotent(reference, "Paid", payload);
       return res.json({ success: true, verified: true, order: created });
     }
@@ -1389,8 +2104,6 @@ app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchem
     payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
 
     const upd = await dbQuery(`UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1 RETURNING *`, [reference, payload]);
-
-    logInfo("security.paystack_verified", { rid: req.rid || "-", ip, reference, paidNaira });
     return res.json({ success: true, verified: true, order: upd.rows[0] });
   } catch (e) {
     logError("paystack.verify_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
@@ -1398,74 +2111,33 @@ app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchem
   }
 });
 
-// Orders admin list
-app.get("/orders", requireAdmin, async (req, res) => {
-  try {
-    const status = String(req.query.status || "").trim();
-    const q = String(req.query.q || "").trim().toLowerCase();
+/* ===================== CAPTCHA (HCAPTCHA) ===================== */
+const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY || "";
+const CAPTCHA_REQUIRED = String(process.env.CAPTCHA_REQUIRED || "true").toLowerCase() !== "false";
 
-    let sql = `SELECT * FROM orders`;
-    const where = [];
-    const params = [];
+async function verifyHCaptchaToken(token, ip) {
+  if (!CAPTCHA_REQUIRED) return true;
+  if (!HCAPTCHA_SECRET_KEY) return false;
+  if (!token) return false;
 
-    if (status) {
-      params.push(status);
-      where.push(`status=$${params.length}`);
-    }
+  const f = await ensureFetch();
+  if (!f) throw new Error("fetch not available (captcha verify)");
 
-    if (q) {
-      params.push(`%${q}%`);
-      const p = `$${params.length}`;
-      where.push(`(
-        LOWER(reference) LIKE ${p}
-        OR LOWER(payload->>'name') LIKE ${p}
-        OR LOWER(payload->>'phone') LIKE ${p}
-        OR LOWER(payload->>'email') LIKE ${p}
-      )`);
-    }
+  const form = new URLSearchParams();
+  form.append("secret", String(HCAPTCHA_SECRET_KEY));
+  form.append("response", String(token));
+  if (ip) form.append("remoteip", String(ip));
 
-    if (where.length) sql += ` WHERE ` + where.join(" AND ");
-    sql += ` ORDER BY created_at DESC`;
+  const r = await f("https://hcaptcha.com/siteverify", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+  const data = await r.json().catch(() => null);
+  return Boolean(data?.success);
+}
 
-    const out = await dbQuery(sql, params);
-    res.json(out.rows);
-  } catch (err) {
-    logError("orders.list_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    res.status(500).json([]);
-  }
-});
-
-app.patch(
-  "/orders/:id/status",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  validate(OrderStatusSchema, "body"),
-  async (req, res) => {
-    try {
-      const orderId = Number(req.params.id);
-      const status = String(req.body.status || "").trim();
-
-      const updated = await dbQuery(`UPDATE orders SET status=$1 WHERE id=$2 RETURNING *`, [status, orderId]);
-      if (!updated.rows.length) return res.status(404).json({ success: false, message: "Order not found" });
-
-      res.json({ success: true, order: updated.rows[0] });
-    } catch (err) {
-      logError("orders.status_patch_failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Failed to update status" });
-    }
-  }
-);
-
-/* ===================== CONTACT ===================== */
-const ContactSchema = z.object({
-  name: zNonEmpty("Name is required").max(120, "Name too long"),
-  email: zEmail,
-  message: zNonEmpty("Message is required").max(5000, "Message too long"),
-  captchaToken: z.string().optional(),
-});
-
+/* ===================== CONTACT + NEWSLETTER + MESSAGES ===================== */
 const GMAIL_USER = process.env.GMAIL_USER || "";
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || "";
 const transporter =
@@ -1473,16 +2145,20 @@ const transporter =
     ? nodemailer.createTransport({ service: "gmail", auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS } })
     : null;
 
+const ContactSchema = z.object({
+  name: zNonEmpty("Name is required").max(120),
+  email: zEmail,
+  message: zNonEmpty("Message is required").max(5000),
+  captchaToken: z.string().optional(),
+});
+
 app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res) => {
   try {
     await ensureCapsLoaded("messages");
     const ip = getClientIp(req);
 
     const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
-    if (!okCaptcha) {
-      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
-      return res.status(400).json({ success: false, msg: "Captcha failed. Try again." });
-    }
+    if (!okCaptcha) return res.status(400).json({ success: false, msg: "Captcha failed. Try again." });
 
     const { name, email, message } = req.body;
 
@@ -1490,7 +2166,7 @@ app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res)
       await dbQuery(`INSERT INTO messages (name, email, message, created_at) VALUES ($1,$2,$3,$4)`, [
         String(name), String(email), String(message), new Date(),
       ]);
-    } catch (e) {
+    } catch {
       const fallbackId = Math.floor(Date.now() / 1000);
       await dbQuery(`INSERT INTO messages (id, name, email, message, created_at) VALUES ($1,$2,$3,$4,$5)`, [
         fallbackId, String(name), String(email), String(message), new Date(),
@@ -1514,7 +2190,6 @@ app.post("/api/contact", writeLimiter, validate(ContactSchema), async (req, res)
   }
 });
 
-/* ===================== NEWSLETTER ===================== */
 const NewsletterSchema = z.object({
   email: zEmail,
   captchaToken: z.string().optional(),
@@ -1526,20 +2201,16 @@ app.post("/api/newsletter/subscribe", writeLimiter, validate(NewsletterSchema), 
     const ip = getClientIp(req);
 
     const okCaptcha = await verifyHCaptchaToken(req.body.captchaToken, ip);
-    if (!okCaptcha) {
-      logWarn("security.captcha_failed", { rid: req.rid || "-", ip, path: req.originalUrl });
-      return res.status(400).json({ ok: false, message: "Captcha failed. Try again." });
-    }
+    if (!okCaptcha) return res.status(400).json({ ok: false, message: "Captcha failed. Try again." });
 
     const emailRaw = req.body.email;
-
     const exists = await dbQuery(`SELECT 1 FROM newsletter_subscribers WHERE email=$1`, [emailRaw]);
     const already = exists.rows.length > 0;
 
     if (!already) {
       try {
         await dbQuery(`INSERT INTO newsletter_subscribers (email, subscribed_at) VALUES ($1,$2)`, [emailRaw, new Date()]);
-      } catch (e) {
+      } catch {
         const fallbackId = Math.floor(Date.now() / 1000);
         await dbQuery(`INSERT INTO newsletter_subscribers (id, email, subscribed_at) VALUES ($1,$2,$3)`, [
           fallbackId, emailRaw, new Date(),
@@ -1547,126 +2218,34 @@ app.post("/api/newsletter/subscribe", writeLimiter, validate(NewsletterSchema), 
       }
     }
 
-    if (transporter) {
-      await transporter.sendMail({
-        from: `KÍKÉLÁRÁ <${GMAIL_USER}>`,
-        to: emailRaw,
-        subject: "✅ You’re subscribed — welcome to KÍKÉLÁRÁ",
-        text: `Hi,
-
-Thanks for subscribing to KÍKÉLÁRÁ ✨
-You’ll be first to know about product drops, restocks, and skincare tips.
-
-If you didn’t subscribe, you can ignore this email.
-
-— KÍKÉLÁRÁ Skincare`,
-        html: `<div style="font-family:Arial,sans-serif;line-height:1.6;color:#2b1d12;">
-  <h2 style="margin:0 0 10px;">Welcome to KÍKÉLÁRÁ ✨</h2>
-  <p style="margin:0 0 12px;">Thanks for subscribing. You’ll be first to know about product drops, restocks, and skincare tips.</p>
-  <p style="margin:0 0 12px;"><b>Your email:</b> ${emailRaw}</p>
-  <p style="margin:0;">If you didn’t subscribe, ignore this email.</p>
-  <hr style="border:none;border-top:1px solid #e8d7c7;margin:16px 0;">
-  <p style="margin:0;font-size:12px;opacity:.75;">© ${new Date().getFullYear()} KÍKÉLÁRÁ Skincare</p>
-</div>`,
-      });
-    }
-
-    return res.json({
-      ok: true,
-      already,
-      message: transporter
-        ? already
-          ? "Already subscribed — confirmation sent."
-          : "Subscribed — confirmation sent."
-        : already
-        ? "Already subscribed."
-        : "Subscribed.",
-    });
+    res.json({ ok: true, already, message: already ? "Already subscribed." : "Subscribed." });
   } catch (err) {
     logError("newsletter.failed", { rid: req.rid || "-", message: String(err?.message || err).slice(0, 600) });
-    return res.status(500).json({ ok: false, message: "Server error" });
+    res.status(500).json({ ok: false, message: "Server error" });
   }
 });
 
-/* ===================== MESSAGES (ADMIN) ===================== */
 app.get("/admin/messages", requireAdmin, async (req, res) => {
   try {
     const out = await dbQuery(`SELECT * FROM messages ORDER BY created_at DESC`);
     res.json(out.rows);
-  } catch (e) {
-    logError("messages.list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+  } catch {
     res.json([]);
-  }
-});
-
-app.delete(
-  "/admin/messages/:id",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      const out = await dbQuery(`DELETE FROM messages WHERE id=$1 RETURNING id`, [id]);
-      if (!out.rows.length) return res.status(404).json({ success: false, message: "Message not found" });
-      res.json({ success: true });
-    } catch (e) {
-      logError("messages.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Delete failed" });
-    }
-  }
-);
-
-/* ===================== PRODUCTS (PUBLIC) ===================== */
-app.get("/api/products", async (req, res) => {
-  try {
-    await ensureCapsLoaded("products");
-    const includeAll = String(req.query.all || "").toLowerCase() === "true";
-    const sql = includeAll
-      ? `SELECT * FROM products ORDER BY created_at DESC`
-      : `SELECT * FROM products WHERE is_active=true ORDER BY created_at DESC`;
-
-    const out = await dbQuery(sql);
-    const rows = await Promise.all(out.rows.map(withSignedImage));
-    res.json(rows);
-  } catch (e) {
-    logError("products.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.json([]);
-  }
-});
-
-app.get("/api/products/:id", validate(IdParamSchema, "params"), async (req, res) => {
-  try {
-    await ensureCapsLoaded("products");
-    const id = Number(req.params.id);
-
-    const out = await dbQuery(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
-    if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
-
-    const p = out.rows[0];
-    if (!p.is_active) return res.status(404).json({ success: false, message: "Product not found" });
-
-    const signed = await withSignedImage(p);
-    res.json({ success: true, product: signed });
-  } catch (e) {
-    logError("products.public_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, message: "Server error" });
   }
 });
 
 /* ===================== REVIEWS (PUBLIC) ===================== */
 const ReviewCreateSchema = z.object({
-  name: zNonEmpty("Missing name").max(80, "Name too long").default("Anonymous"),
-  title: zNonEmpty("Missing title").min(3, "Title too short").max(60, "Title too long"),
-  text: zNonEmpty("Missing text").min(10, "Text too short").max(500, "Text too long"),
+  name: zNonEmpty("Missing name").max(80).default("Anonymous"),
+  title: zNonEmpty("Missing title").min(3).max(60),
+  text: zNonEmpty("Missing text").min(10).max(500),
   rating: z.coerce.number().int().min(1).max(5),
-  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long"),
+  deviceId: zNonEmpty("Missing deviceId").max(120),
 });
 
 const VoteSchema = z.object({
   voteType: z.enum(["up", "down"]),
-  deviceId: zNonEmpty("Missing deviceId").max(120, "deviceId too long"),
+  deviceId: zNonEmpty("Missing deviceId").max(120),
 });
 
 async function getReviewsWithVotes(productId) {
@@ -1718,9 +2297,9 @@ async function getReviewsWithVotes(productId) {
   }));
 }
 
-app.get("/api/products/:id/reviews", validate(IdParamSchema, "params"), async (req, res) => {
+app.get("/api/products/:id/reviews", validate(ProductIdParamSchema, "params"), async (req, res) => {
   try {
-    const productId = Number(req.params.id);
+    const productId = String(req.params.id);
 
     const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
     if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, reviews: [] });
@@ -1733,9 +2312,9 @@ app.get("/api/products/:id/reviews", validate(IdParamSchema, "params"), async (r
   }
 });
 
-app.get("/api/products/:id/reviews/summary", validate(IdParamSchema, "params"), async (req, res) => {
+app.get("/api/products/:id/reviews/summary", validate(ProductIdParamSchema, "params"), async (req, res) => {
   try {
-    const productId = Number(req.params.id);
+    const productId = String(req.params.id);
 
     const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
     if (!p.rows.length || !p.rows[0].is_active)
@@ -1761,11 +2340,11 @@ app.get("/api/products/:id/reviews/summary", validate(IdParamSchema, "params"), 
 app.post(
   "/api/products/:id/reviews",
   writeLimiter,
-  validate(IdParamSchema, "params"),
+  validate(ProductIdParamSchema, "params"),
   validate(ReviewCreateSchema),
   async (req, res) => {
     try {
-      const productId = Number(req.params.id);
+      const productId = String(req.params.id);
 
       const p = await dbQuery(`SELECT id, is_active FROM products WHERE id=$1 LIMIT 1`, [productId]);
       if (!p.rows.length || !p.rows[0].is_active) return res.status(404).json({ ok: false, message: "Product not found" });
@@ -1815,535 +2394,81 @@ app.post(
   }
 );
 
-app.post("/api/reviews/:id/vote", writeLimiter, validate(IdParamSchema, "params"), validate(VoteSchema), async (req, res) => {
-  try {
-    const reviewId = Number(req.params.id);
-    const voteType = String(req.body.voteType);
-    const deviceId = String(req.body.deviceId || "").trim();
-
-    if (!DB_CAPS.product_reviews.exists || !DB_CAPS.review_votes.exists) {
-      return res.status(500).json({ ok: false, message: "Voting not configured" });
-    }
-
-    const exists = await dbQuery(`SELECT id FROM product_reviews WHERE id=$1 LIMIT 1`, [reviewId]);
-    if (!exists.rows.length) return res.status(404).json({ ok: false, message: "Review not found" });
-
-    await dbQuery(
-      `
-      INSERT INTO review_votes (review_id, device_id, vote_type)
-      VALUES ($1,$2,$3)
-      ON CONFLICT (review_id, device_id) DO UPDATE SET vote_type=EXCLUDED.vote_type
-      `,
-      [reviewId, deviceId, voteType]
-    );
-
-    const r = await dbQuery(
-      `
-      SELECT
-        pr.*,
-        COALESCE(SUM(CASE WHEN rv.vote_type='up' THEN 1 ELSE 0 END), 0)::int AS up_votes,
-        COALESCE(SUM(CASE WHEN rv.vote_type='down' THEN 1 ELSE 0 END), 0)::int AS down_votes
-      FROM product_reviews pr
-      LEFT JOIN review_votes rv ON rv.review_id = pr.id
-      WHERE pr.id = $1
-      GROUP BY pr.id
-      LIMIT 1
-      `,
-      [reviewId]
-    );
-
-    const x = r.rows[0];
-    res.json({
-      ok: true,
-      review: {
-        id: x.id,
-        product_id: x.product_id,
-        name: x.name,
-        title: x.title,
-        text: x.text,
-        rating: x.rating,
-        verified: x.verified,
-        device_id: x.device_id,
-        created_at: x.created_at,
-        votes: { up: x.up_votes, down: x.down_votes },
-      },
-    });
-  } catch (e) {
-    logError("reviews.vote_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ ok: false, message: "Vote failed" });
-  }
-});
-
-/* ===================== REVIEWS (ADMIN DELETE) ===================== */
-app.delete("/admin/reviews/:id", writeLimiter, requireAdmin, requireCsrf, validate(IdParamSchema, "params"), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    if (!DB_CAPS.product_reviews.exists) return res.status(500).json({ success: false, message: "Reviews not configured" });
-
-    const del = await dbQuery(`DELETE FROM product_reviews WHERE id=$1 RETURNING id`, [id]);
-    if (!del.rows.length) return res.status(404).json({ success: false, message: "Review not found" });
-
-    res.json({ success: true });
-  } catch (e) {
-    logError("reviews.admin_delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, message: "Delete failed" });
-  }
-});
-
-/* ===================== PRODUCTS (ADMIN) ===================== */
-function capsLoadedProducts() {
-  return DB_CAPS.products?.columns && DB_CAPS.products.columns.size > 0;
-}
-function hasProductCol(c) {
-  return DB_CAPS.products?.columns?.has(c);
-}
-
-function makeSafeProductId() {
-  const t = String(DB_CAPS.products?.idType || "").toLowerCase();
-  if (t.includes("uuid")) return crypto.randomUUID();
-  if (t.includes("bigint")) return Date.now(); // bigint ok
-  if (t.includes("integer") || t.includes("int")) return Math.floor(Date.now() / 1000); // int4 safe
-  return Math.floor(Date.now() / 1000);
-}
-
-function buildInsertSQL(table, cols) {
-  const params = cols.map((_, i) => `$${i + 1}`);
-  return `INSERT INTO ${table} (${cols.join(",")}) VALUES (${params.join(",")}) RETURNING *`;
-}
-function isUndefinedColumnErr(e) {
-  return String(e?.code || "") === "42703";
-}
-function isNotNullIdErr(e) {
-  return String(e?.code || "") === "23502" && (String(e?.column || "") === "id" || /column "id"/i.test(String(e?.message || "")));
-}
-
-async function insertProductRow(client, { id, name, price, description, imageKey, isActive, payload }) {
-  const now = new Date();
-  const candidates = [];
-
-  // Best attempt if caps loaded
-  if (capsLoadedProducts()) {
-    const cols = [];
-    const vals = [];
-
-    const includeId = DB_CAPS.products.idHasDefault === false && hasProductCol("id");
-    if (includeId) { cols.push("id"); vals.push(id); }
-    if (hasProductCol("name")) { cols.push("name"); vals.push(name); }
-    if (hasProductCol("price")) { cols.push("price"); vals.push(price); }
-    if (hasProductCol("description")) { cols.push("description"); vals.push(description || null); }
-    if (hasProductCol("image_url")) { cols.push("image_url"); vals.push(imageKey || null); }
-    if (hasProductCol("is_active")) { cols.push("is_active"); vals.push(isActive); }
-    if (hasProductCol("created_at")) { cols.push("created_at"); vals.push(now); }
-    if (hasProductCol("updated_at")) { cols.push("updated_at"); vals.push(now); }
-    if (hasProductCol("payload")) { cols.push("payload"); vals.push(payload || {}); }
-    if (hasProductCol("images")) { cols.push("images"); vals.push([]); }
-
-    if (cols.length >= 2) candidates.push({ sql: buildInsertSQL("products", cols), vals });
-  }
-
-  // Fallback attempts (unknown schema)
-  const baseNoId = [
-    { cols: ["name", "price", "description", "image_url", "is_active", "created_at", "updated_at"], vals: [name, price, description || null, imageKey || null, isActive, now, now] },
-    { cols: ["name", "price", "description", "image_url", "is_active"], vals: [name, price, description || null, imageKey || null, isActive] },
-    { cols: ["name", "price", "description", "image_url"], vals: [name, price, description || null, imageKey || null] },
-    { cols: ["name", "price", "description"], vals: [name, price, description || null] },
-    { cols: ["name", "price"], vals: [name, price] },
-  ];
-  const baseWithId = [
-    { cols: ["id", "name", "price", "description", "image_url", "is_active", "created_at", "updated_at"], vals: [id, name, price, description || null, imageKey || null, isActive, now, now] },
-    { cols: ["id", "name", "price", "description", "image_url", "is_active"], vals: [id, name, price, description || null, imageKey || null, isActive] },
-    { cols: ["id", "name", "price"], vals: [id, name, price] },
-  ];
-
-  for (const c of baseNoId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
-  for (const c of baseWithId) candidates.push({ sql: buildInsertSQL("products", c.cols), vals: c.vals });
-
-  let lastErr = null;
-  for (const cand of candidates) {
-    try {
-      const r = await client.query(cand.sql, cand.vals);
-      if (r.rows?.[0]) return r.rows[0];
-    } catch (e) {
-      lastErr = e;
-      if (isUndefinedColumnErr(e) || isNotNullIdErr(e)) continue;
-      // if table differs in other ways, try next candidates too
-      continue;
-    }
-  }
-  throw lastErr || new Error("Insert failed");
-}
-
-async function updateProductRow(client, id, { name, price, description, imageKey, isActive, payloadMerged }) {
-  // Prefer caps-based dynamic update
-  if (capsLoadedProducts()) {
-    const sets = [];
-    const vals = [];
-    let i = 0;
-
-    if (hasProductCol("name")) { sets.push(`name=$${++i}`); vals.push(name); }
-    if (hasProductCol("price")) { sets.push(`price=$${++i}`); vals.push(price); }
-    if (hasProductCol("description")) { sets.push(`description=$${++i}`); vals.push(description || null); }
-    if (hasProductCol("image_url")) { sets.push(`image_url=$${++i}`); vals.push(imageKey || null); }
-    if (hasProductCol("is_active")) { sets.push(`is_active=$${++i}`); vals.push(isActive); }
-    if (hasProductCol("payload")) { sets.push(`payload=$${++i}`); vals.push(payloadMerged || {}); }
-    if (hasProductCol("updated_at")) { sets.push(`updated_at=NOW()`); }
-
-    if (!sets.length) throw new Error("No updatable columns found on products table");
-
-    vals.push(id);
-    const sql = `UPDATE products SET ${sets.join(", ")} WHERE id=$${++i} RETURNING *`;
-    const r = await client.query(sql, vals);
-    return r.rows?.[0] || null;
-  }
-
-  // Fallbacks if caps not loaded
-  const candidates = [
-    {
-      sql: `UPDATE products
-            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW(), payload=$6
-            WHERE id=$7 RETURNING *`,
-      vals: [name, price, description || null, imageKey || null, isActive, payloadMerged || {}, id],
-    },
-    {
-      sql: `UPDATE products
-            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5, updated_at=NOW()
-            WHERE id=$6 RETURNING *`,
-      vals: [name, price, description || null, imageKey || null, isActive, id],
-    },
-    {
-      sql: `UPDATE products
-            SET name=$1, price=$2, description=$3, image_url=$4, is_active=$5
-            WHERE id=$6 RETURNING *`,
-      vals: [name, price, description || null, imageKey || null, isActive, id],
-    },
-    {
-      sql: `UPDATE products
-            SET name=$1, price=$2, image_url=$3, is_active=$4
-            WHERE id=$5 RETURNING *`,
-      vals: [name, price, imageKey || null, isActive, id],
-    },
-    {
-      sql: `UPDATE products
-            SET name=$1, price=$2
-            WHERE id=$3 RETURNING *`,
-      vals: [name, price, id],
-    },
-  ];
-
-  let lastErr = null;
-  for (const cand of candidates) {
-    try {
-      const r = await client.query(cand.sql, cand.vals);
-      if (r.rows?.[0]) return r.rows[0];
-      return null;
-    } catch (e) {
-      lastErr = e;
-      if (isUndefinedColumnErr(e)) continue;
-      continue;
-    }
-  }
-  throw lastErr || new Error("Update failed");
-}
-
-app.get("/admin/products", requireAdmin, async (req, res) => {
-  try {
-    await ensureCapsLoaded("products");
-    const out = await dbQuery(`SELECT * FROM products ORDER BY created_at DESC`);
-    const rows = await Promise.all(out.rows.map(withSignedImage)); // ✅ fixed typo
-    res.json({ success: true, products: rows });
-  } catch (e) {
-    logError("products.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    res.status(500).json({ success: false, products: [] });
-  }
-});
-
-const CreateProductSchema = z
-  .object({
-    name: zNonEmpty("Missing name").max(200, "Name too long"),
-    price: z.coerce.number().min(0, "Invalid price").default(0),
-    description: z.string().trim().max(5000, "Description too long").optional().default(""),
-    is_active: z.string().optional(),
-  })
-  .passthrough();
-
-const UpdateProductSchema = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    price: z.coerce.number().min(0).optional(),
-    description: z.string().trim().max(5000).optional(),
-    is_active: z.string().optional(),
-    remove_image: z.string().optional(),
-  })
-  .passthrough();
-
+// Vote on a review (up/down) per deviceId (one vote per device per review)
 app.post(
-  "/admin/products",
+  "/api/reviews/:id/vote",
   writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  upload.single("image"),
-  validate(CreateProductSchema),
-  async (req, res) => {
-    let uploadedKey = "";
-
-    try {
-      await ensureCapsLoaded("products");
-
-      const name = String(req.body.name || "").trim();
-      const price = Math.max(0, Math.round(Number(req.body.price || 0)));
-      const description = String(req.body.description || "").trim();
-      const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
-
-      const payload = { ...req.body };
-
-      const createdRow = await withDbClient(async (client) => {
-        await client.query("BEGIN");
-        try {
-          const id = makeSafeProductId();
-
-          let row = await insertProductRow(client, {
-            id,
-            name,
-            price,
-            description,
-            imageKey: null,
-            isActive,
-            payload,
-          });
-
-          if (!row) throw new Error("Insert failed");
-
-          if (req.file?.buffer) {
-            if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
-
-            logInfo("products.image_received", {
-              rid: req.rid || "-",
-              productId: row.id,
-              bytes: req.file.size,
-              mimetype: req.file.mimetype,
-              name: req.file.originalname,
-            });
-
-            const up = await uploadProductImageToSupabase({
-              buffer: req.file.buffer,
-              originalName: req.file.originalname,
-              productId: row.id,
-            });
-            uploadedKey = up.key;
-
-            logInfo("products.image_uploaded", { rid: req.rid || "-", productId: row.id, key: uploadedKey });
-
-            const hasPayload = hasProductCol("payload");
-            const nextPayload = hasPayload
-              ? Object.assign(
-                  {},
-                  row.payload && typeof row.payload === "object" ? row.payload : {},
-                  payload,
-                  { __image_key: uploadedKey }
-                )
-              : null;
-
-            // update image + payload safely
-            row = await updateProductRow(client, row.id, {
-              name: row.name ?? name,
-              price: row.price ?? price,
-              description: row.description ?? description,
-              imageKey: uploadedKey,
-              isActive: row.is_active ?? isActive,
-              payloadMerged: nextPayload,
-            });
-          }
-
-          await client.query("COMMIT");
-          return row;
-        } catch (err) {
-          await client.query("ROLLBACK");
-          throw err;
-        }
-      });
-
-      const signed = await withSignedImage(createdRow);
-      return res.json({ success: true, product: signed });
-    } catch (e) {
-      if (uploadedKey) await deleteSupabaseKey(uploadedKey);
-
-      logError("products.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-
-      const msg = String(e?.message || e);
-      return res.status(500).json({
-        success: false,
-        message: IS_PROD ? "Create product failed" : `Create product failed: ${msg}`,
-      });
-    }
-  }
-);
-
-app.put(
-  "/admin/products/:id",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  upload.single("image"),
   validate(IdParamSchema, "params"),
-  validate(UpdateProductSchema),
+  validate(VoteSchema),
   async (req, res) => {
-    let newUploadedKey = "";
-
     try {
-      await ensureCapsLoaded("products");
-      const id = Number(req.params.id);
+      const reviewId = Number(req.params.id);
 
-      const updatedRow = await withDbClient(async (client) => {
-        await client.query("BEGIN");
-        try {
-          const current = await client.query(`SELECT * FROM products WHERE id=$1 LIMIT 1`, [id]);
-          if (!current.rows.length) {
-            await client.query("ROLLBACK");
-            return null;
-          }
-          const existing = current.rows[0];
+      if (!DB_CAPS.review_votes.exists) return res.status(500).json({ ok: false, message: "Votes not configured" });
 
-          const name = String(req.body?.name ?? existing.name).trim();
-          const price = Math.max(0, Math.round(Number(req.body?.price ?? existing.price)));
-          const description = String(req.body?.description ?? (existing.description || "")).trim();
-          const isActive =
-            req.body?.is_active === undefined ? Boolean(existing.is_active) : String(req.body.is_active).toLowerCase() !== "false";
+      const voteType = String(req.body.voteType);
+      const deviceId = String(req.body.deviceId).trim();
 
-          const removeImage = String(req.body?.remove_image || "").toLowerCase() === "true";
+      // Ensure review exists
+      const r1 = await dbQuery(`SELECT id FROM product_reviews WHERE id=$1 LIMIT 1`, [reviewId]);
+      if (!r1.rows.length) return res.status(404).json({ ok: false, message: "Review not found" });
 
-          const payloadMerged =
-            hasProductCol("payload")
-              ? existing.payload && typeof existing.payload === "object"
-                ? Object.assign({}, existing.payload, req.body || {})
-                : Object.assign({}, req.body || {})
-              : null;
+      // Upsert vote
+      await dbQuery(
+        `
+        INSERT INTO review_votes (review_id, device_id, vote_type)
+        VALUES ($1,$2,$3)
+        ON CONFLICT (review_id, device_id)
+        DO UPDATE SET vote_type=EXCLUDED.vote_type
+        `,
+        [reviewId, deviceId, voteType]
+      );
 
-          let imageKey = String(existing.image_url || "").trim() || null;
+      // Return updated counts
+      const counts = await dbQuery(
+        `
+        SELECT
+          COALESCE(SUM(CASE WHEN vote_type='up' THEN 1 ELSE 0 END),0)::int AS up_votes,
+          COALESCE(SUM(CASE WHEN vote_type='down' THEN 1 ELSE 0 END),0)::int AS down_votes
+        FROM review_votes
+        WHERE review_id=$1
+        `,
+        [reviewId]
+      );
 
-          if (removeImage) {
-            const oldKey = extractImageKey(existing) || imageKey;
-            if (oldKey) await deleteSupabaseKey(oldKey);
-            imageKey = null;
-            if (payloadMerged && typeof payloadMerged === "object") delete payloadMerged.__image_key;
-          }
-
-          if (req.file?.buffer) {
-            if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
-
-            const up = await uploadProductImageToSupabase({
-              buffer: req.file.buffer,
-              originalName: req.file.originalname,
-              productId: id,
-            });
-            newUploadedKey = up.key;
-
-            const oldKey = extractImageKey(existing) || imageKey;
-            if (oldKey) await deleteSupabaseKey(oldKey);
-
-            imageKey = newUploadedKey;
-            if (payloadMerged && typeof payloadMerged === "object") payloadMerged.__image_key = imageKey;
-          }
-
-          const row = await updateProductRow(client, id, {
-            name,
-            price,
-            description,
-            imageKey,
-            isActive,
-            payloadMerged,
-          });
-
-          await client.query("COMMIT");
-          return row;
-        } catch (err) {
-          await client.query("ROLLBACK");
-          throw err;
-        }
-      });
-
-      if (!updatedRow) return res.status(404).json({ success: false, message: "Product not found" });
-
-      const signed = await withSignedImage(updatedRow);
-      return res.json({ success: true, product: signed });
+      const row = counts.rows[0] || { up_votes: 0, down_votes: 0 };
+      res.json({ ok: true, votes: { up: Number(row.up_votes || 0), down: Number(row.down_votes || 0) } });
     } catch (e) {
-      if (newUploadedKey) await deleteSupabaseKey(newUploadedKey);
-
-      logError("products.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
-
-      const msg = String(e?.message || e);
-      return res.status(500).json({
-        success: false,
-        message: IS_PROD ? "Update product failed" : `Update product failed: ${msg}`,
-      });
+      logError("reviews.vote_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      res.status(500).json({ ok: false, message: "Failed to vote" });
     }
   }
 );
 
-app.delete(
-  "/admin/products/:id",
-  writeLimiter,
-  requireAdmin,
-  requireCsrf,
-  validate(IdParamSchema, "params"),
-  async (req, res) => {
-    try {
-      await ensureCapsLoaded("products");
-      const id = Number(req.params.id);
-
-      const current = await dbQuery(`SELECT * FROM products WHERE id=$1`, [id]);
-      if (!current.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
-
-      const oldKey = extractImageKey(current.rows[0]);
-      if (oldKey) await deleteSupabaseKey(oldKey);
-
-      const out = await dbQuery(`DELETE FROM products WHERE id=$1 RETURNING id`, [id]);
-      if (!out.rows.length) return res.status(404).json({ success: false, message: "Product not found" });
-
-      res.json({ success: true });
-    } catch (e) {
-      logError("products.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-      res.status(500).json({ success: false, message: "Delete failed" });
-    }
-  }
-);
-
-/* ===================== ERROR HANDLER (SAFE) ===================== */
+/* ===================== ERROR HANDLER ===================== */
 app.use((err, req, res, next) => {
   const msg = String(err?.message || err || "");
-  const rid = req?.rid || "-";
+  logError("unhandled_error", { rid: req?.rid || "-", method: req?.method, path: req?.originalUrl, message: msg.slice(0, 800) });
 
-  logError("unhandled_error", {
-    rid,
-    method: req?.method,
-    path: req?.originalUrl,
-    message: msg.slice(0, 800),
-  });
-
-  if (msg.startsWith("Not allowed by CORS")) {
-    return res.status(403).json({ success: false, message: "CORS blocked" });
-  }
-
-  res.status(500).json({ success: false, message: "Server error", rid });
+  if (msg.startsWith("Not allowed by CORS")) return res.status(403).json({ success: false, message: "CORS blocked" });
+  res.status(500).json({ success: false, message: "Server error", rid: req?.rid || "-" });
 });
 
-/* ===================== START SERVER + BOOT CHECKS ===================== */
+/* ===================== START SERVER ===================== */
 (async () => {
   try {
-    if (!pool) logWarn("boot.no_database", { message: "DATABASE_URL not set (API will fail DB routes)" });
+    if (!pool) logWarn("boot.no_database", { message: "DATABASE_URL not set (DB routes will fail)" });
     if (pool) await initDbCaps();
-
     if (!ADMIN_PASSWORD_HASH) logWarn("boot.admin_not_configured", { message: "ADMIN_PASSWORD_HASH missing" });
 
-    app.listen(PORT, () => {
-      logInfo("boot", { msg: `Backend running on port ${PORT}` });
-    });
+    app.listen(PORT, () => logInfo("boot", { msg: `Backend running on port ${PORT}` }));
   } catch (e) {
     logError("boot_failed", { message: String(e?.message || e).slice(0, 600) });
     process.exit(1);
   }
 })();
 
-// Graceful shutdown
+/* ===================== GRACEFUL SHUTDOWN ===================== */
 process.on("SIGTERM", async () => {
   try {
     logInfo("shutdown", { msg: "SIGTERM received" });
