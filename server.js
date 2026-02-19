@@ -2086,7 +2086,83 @@ app.post("/orders", writeLimiter, validate(OrdersSchema), async (req, res) => {
   }
 });
 
-// Aliases (avoid 404 noise if frontend calls these)
+/* ===================== ORDERS (ADMIN - COMPAT ROUTES) ===================== */
+
+// Accept many payload shapes from different frontend versions
+const AdminOrderStatusSchema = z.object({
+  status: z.string().trim().min(1).max(40).optional(),
+  newStatus: z.string().trim().min(1).max(40).optional(),
+  value: z.string().trim().min(1).max(40).optional(),
+
+  id: z.coerce.number().int().positive().optional(),
+  orderId: z.coerce.number().int().positive().optional(),
+  order_id: z.coerce.number().int().positive().optional(),
+
+  reference: z.string().trim().min(1).max(200).optional(),
+}).passthrough();
+
+function pickStatusFromBody(body) {
+  const b = body || {};
+  const s =
+    b.status ??
+    b.newStatus ??
+    b.value ??
+    b.orderStatus ??
+    b.order_status ??
+    b.state;
+  return String(s || "").trim();
+}
+
+function pickIdFromBody(body) {
+  const b = body || {};
+  const id = b.id ?? b.orderId ?? b.order_id;
+  const n = Number(id);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
+function pickReferenceFromBody(body) {
+  const b = body || {};
+  const r = b.reference ?? b.ref ?? b.paystackRef;
+  const s = String(r || "").trim();
+  return s ? s : null;
+}
+
+function mergePayloadStatus(row, status) {
+  const payload = row?.payload && typeof row.payload === "object" ? { ...row.payload } : {};
+  payload.status = status;
+  payload.updatedAt = new Date().toISOString();
+  return payload;
+}
+
+async function updateOrderStatusById(id, status) {
+  const cur = await dbQuery(`SELECT * FROM orders WHERE id=$1 LIMIT 1`, [id]);
+  if (!cur.rows.length) return null;
+
+  const row = cur.rows[0];
+  const payload = mergePayloadStatus(row, status);
+
+  const upd = await dbQuery(
+    `UPDATE orders SET status=$1, payload=$2 WHERE id=$3 RETURNING *`,
+    [status, payload, id]
+  );
+  return upd.rows[0] || null;
+}
+
+async function updateOrderStatusByReference(reference, status) {
+  const cur = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
+  if (!cur.rows.length) return null;
+
+  const row = cur.rows[0];
+  const payload = mergePayloadStatus(row, status);
+
+  const upd = await dbQuery(
+    `UPDATE orders SET status=$1, payload=$2 WHERE reference=$3 RETURNING *`,
+    [status, payload, reference]
+  );
+  return upd.rows[0] || null;
+}
+
+// ✅ Keep list routes (compat: some frontends expect raw array)
 app.get("/admin/orders", requireAdmin, async (req, res) => {
   try {
     const out = await dbQuery(`SELECT * FROM orders ORDER BY created_at DESC`);
@@ -2104,57 +2180,159 @@ app.get("/admin/orders/list", requireAdmin, async (req, res) => {
   }
 });
 
-const VerifyPaystackSchema = z.object({
-  reference: zNonEmpty("Missing reference").max(200),
-  expectedAmount: z.coerce.number().min(0).optional(),
-});
-
-app.post("/payments/paystack/verify", writeLimiter, validate(VerifyPaystackSchema), async (req, res) => {
+// ✅ NEW: get single order (fixes GET /admin/orders/11 404)
+app.get("/admin/orders/:id", requireAdmin, validate(IdParamSchema, "params"), async (req, res) => {
   try {
-    const { reference, expectedAmount } = req.body;
-    const verify = await verifyPaystack(reference);
-
-    const ok = Boolean(verify?.status) && verify?.data?.status === "success";
-    if (!ok) return res.status(400).json({ success: false, message: "Payment not verified" });
-
-    const paidKobo = Number(verify?.data?.amount || 0);
-    const paidNaira = Math.round(paidKobo / 100);
-
-    if (expectedAmount !== undefined && Number.isFinite(Number(expectedAmount))) {
-      const exp = Math.round(Number(expectedAmount));
-      if (Math.abs(exp - paidNaira) > 2) return res.status(400).json({ success: false, message: "Amount mismatch" });
-    }
-
-    const existing = await dbQuery(`SELECT * FROM orders WHERE reference=$1 LIMIT 1`, [reference]);
-    if (!existing.rows.length) {
-      const payload = {
-        reference,
-        status: "Paid",
-        paystackRef: reference,
-        createdAt: new Date().toISOString(),
-        paidAt: new Date().toISOString(),
-        amountPaid: paidNaira,
-        paystackTransactionId: verify?.data?.id ?? null,
-      };
-      const created = await insertOrderIdempotent(reference, "Paid", payload);
-      return res.json({ success: true, verified: true, order: created });
-    }
-
-    const order = existing.rows[0];
-    const payload = order.payload && typeof order.payload === "object" ? order.payload : {};
-    payload.status = "Paid";
-    payload.paystackRef = reference;
-    payload.paidAt = payload.paidAt || new Date().toISOString();
-    payload.amountPaid = payload.amountPaid || paidNaira;
-    payload.paystackTransactionId = payload.paystackTransactionId || (verify?.data?.id ?? null);
-
-    const upd = await dbQuery(`UPDATE orders SET status='Paid', payload=$2 WHERE reference=$1 RETURNING *`, [reference, payload]);
-    return res.json({ success: true, verified: true, order: upd.rows[0] });
+    const id = Number(req.params.id);
+    const r = await dbQuery(`SELECT * FROM orders WHERE id=$1 LIMIT 1`, [id]);
+    if (!r.rows.length) return res.status(404).json({ success: false, ok: false, message: "Order not found" });
+    return res.json({ success: true, ok: true, order: r.rows[0] });
   } catch (e) {
-    logError("paystack.verify_error", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    return res.status(500).json({ success: false, message: "Verification failed" });
+    logError("orders.admin_get_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ success: false, ok: false, message: "Server error" });
   }
 });
+
+// ✅ NEW: update status by id (fixes PUT /admin/orders/11/status 404)
+async function handleUpdateById(req, res) {
+  const id = Number(req.params.id);
+  const status = pickStatusFromBody(req.body);
+  if (!status) return res.status(400).json({ success: false, ok: false, message: "Missing status" });
+
+  const updated = await updateOrderStatusById(id, status);
+  if (!updated) return res.status(404).json({ success: false, ok: false, message: "Order not found" });
+
+  return res.json({ success: true, ok: true, order: updated });
+}
+
+app.put(
+  "/admin/orders/:id/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateById(req, res); }
+    catch (e) {
+      logError("orders.admin_status_put_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update status" });
+    }
+  }
+);
+
+app.patch(
+  "/admin/orders/:id/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateById(req, res); }
+    catch (e) {
+      logError("orders.admin_status_patch_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update status" });
+    }
+  }
+);
+
+// ✅ NEW: update via PUT /admin/orders/:id (fixes PUT /admin/orders/13 404)
+app.put(
+  "/admin/orders/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateById(req, res); }
+    catch (e) {
+      logError("orders.admin_put_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update order" });
+    }
+  }
+);
+
+app.patch(
+  "/admin/orders/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(IdParamSchema, "params"),
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateById(req, res); }
+    catch (e) {
+      logError("orders.admin_patch_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update order" });
+    }
+  }
+);
+
+// ✅ NEW: compat route (fixes PUT /admin/orders/status 404)
+// Supports body: {id,status} OR {reference,status}
+async function handleUpdateCompat(req, res) {
+  const status = pickStatusFromBody(req.body);
+  if (!status) return res.status(400).json({ success: false, ok: false, message: "Missing status" });
+
+  const id = pickIdFromBody(req.body);
+  const reference = pickReferenceFromBody(req.body);
+
+  let updated = null;
+  if (id) updated = await updateOrderStatusById(id, status);
+  else if (reference) updated = await updateOrderStatusByReference(reference, status);
+
+  if (!updated) return res.status(404).json({ success: false, ok: false, message: "Order not found (provide id or reference)" });
+
+  return res.json({ success: true, ok: true, order: updated });
+}
+
+app.put(
+  "/admin/orders/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateCompat(req, res); }
+    catch (e) {
+      logError("orders.admin_compat_put_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update status" });
+    }
+  }
+);
+
+app.patch(
+  "/admin/orders/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateCompat(req, res); }
+    catch (e) {
+      logError("orders.admin_compat_patch_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update status" });
+    }
+  }
+);
+
+// Some old frontends use POST instead of PUT:
+app.post(
+  "/admin/orders/status",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(AdminOrderStatusSchema),
+  async (req, res) => {
+    try { return await handleUpdateCompat(req, res); }
+    catch (e) {
+      logError("orders.admin_compat_post_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, ok: false, message: "Failed to update status" });
+    }
+  }
+);
 
 /* ===================== CAPTCHA (HCAPTCHA) ===================== */
 const HCAPTCHA_SECRET_KEY = process.env.HCAPTCHA_SECRET_KEY || "";
