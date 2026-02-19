@@ -1840,6 +1840,7 @@ app.delete(
   }
 );
 /* ===================== HERO SLIDES (HOMEPAGE) ===================== */
+/* ===================== HERO SLIDES (HOMEPAGE) ===================== */
 
 const HeroIdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
 
@@ -1858,121 +1859,73 @@ const HeroUpdateSchema = z.object({
   sort_order: z.coerce.number().int().min(0).max(9999).optional(),
   is_active: z.string().optional(),
   remove_image: z.string().optional(),
+  image_key: z.string().optional(), // allow setting from /admin/hero/upload
 }).passthrough();
 
-/* ---- PUBLIC hero slides ---- */
-// PUBLIC HERO (homepage)
+/**
+ * ✅ IMPORTANT:
+ * This code uses ONE table: public.hero_slides
+ * Columns expected:
+ *  id, title, description, link_url, image_key, image_url, sort_order, is_active, created_at, updated_at, payload
+ *
+ * If you haven't created it yet, use the SQL I gave you earlier for hero_slides.
+ */
+
+/* ---- ADMIN: upload only (fixes your 404) ----
+   Frontend can call this first, then POST /admin/hero with image_key.
+*/
+app.post(
+  "/admin/hero/upload",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  upload.any(), // accept file under any field name ("file", "image", etc.)
+  async (req, res) => {
+    try {
+      const f = req.files?.[0];
+      if (!f?.buffer) return res.status(400).json({ success: false, message: "No file uploaded" });
+
+      const up = await uploadHeroImageToSupabase({
+        buffer: f.buffer,
+        originalName: f.originalname,
+        heroId: "draft", // goes to hero/draft/...
+      });
+
+      let signedUrl = "";
+      try { signedUrl = await signKey(up.key); } catch {}
+
+      return res.json({ success: true, key: up.key, path: up.key, signedUrl });
+    } catch (e) {
+      logError("hero.upload_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Upload failed" });
+    }
+  }
+);
+
+/* ---- PUBLIC list ---- */
 app.get("/api/hero", async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `select id, title, description, link_url, image_url, sort_order
-       from public.hero_items
-       where is_active = true
-       order by sort_order asc, created_at desc
-       limit 20`
+    const r = await dbQuery(
+      `SELECT * FROM public.hero_slides
+       WHERE is_active=true
+       ORDER BY sort_order ASC, updated_at DESC
+       LIMIT 20`
     );
-    res.json({ success: true, items: rows });
+    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: false })));
+    return res.json({ success: true, items });
   } catch (e) {
-    res.status(500).json({ success: false, message: "Failed to load hero" });
+    logError("hero.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.json({ success: true, items: [] });
   }
 });
-
-// ADMIN HERO CRUD
-app.get("/admin/hero", requireAdmin, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `select id, title, description, link_url, image_url, sort_order, is_active, created_at
-       from public.hero_items
-       order by sort_order asc, created_at asc`
-    );
-    res.json({ success: true, items: rows });
-  } catch (e) {
-    res.status(500).json({ success: false, message: "Failed to load hero" });
-  }
-});
-
-app.post("/admin/hero", requireAdmin, async (req, res) => {
-  try {
-    const {
-      title = "",
-      description = "",
-      link_url = "",
-      image_url,
-      sort_order = 0,
-      is_active = true
-    } = req.body || {};
-
-    if (!image_url) return res.status(400).json({ success:false, message:"image_url is required" });
-
-    const { rows } = await pool.query(
-      `insert into public.hero_items (title, description, link_url, image_url, sort_order, is_active)
-       values ($1,$2,$3,$4,$5,$6)
-       returning *`,
-      [title, description, link_url, image_url, Number(sort_order || 0), !!is_active]
-    );
-
-    res.json({ success: true, item: rows[0] });
-  } catch (e) {
-    res.status(500).json({ success: false, message: "Failed to create slide" });
-  }
-});
-
-app.put("/admin/hero/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const {
-      title,
-      description,
-      link_url,
-      image_url,
-      sort_order,
-      is_active
-    } = req.body || {};
-
-    const { rows } = await pool.query(
-      `update public.hero_items
-       set title = $1,
-           description = $2,
-           link_url = $3,
-           image_url = $4,
-           sort_order = $5,
-           is_active = $6
-       where id = $7
-       returning *`,
-      [
-        String(title || ""),
-        String(description || ""),
-        String(link_url || ""),
-        String(image_url || ""),
-        Number(sort_order || 0),
-        !!is_active,
-        id
-      ]
-    );
-
-    if (!rows[0]) return res.status(404).json({ success:false, message:"Not found" });
-    res.json({ success: true, item: rows[0] });
-  } catch (e) {
-    res.status(500).json({ success: false, message: "Failed to update slide" });
-  }
-});
-
-app.delete("/admin/hero/:id", requireAdmin, async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const { rowCount } = await pool.query(`delete from public.hero_items where id=$1`, [id]);
-    if (!rowCount) return res.status(404).json({ success:false, message:"Not found" });
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ success: false, message: "Failed to delete slide" });
-  }
-});
-
 
 /* ---- ADMIN list ---- */
 app.get("/admin/hero", requireAdmin, async (req, res) => {
   try {
-    const r = await dbQuery(`SELECT * FROM homepage_hero ORDER BY sort_order ASC, updated_at DESC`);
+    const r = await dbQuery(
+      `SELECT * FROM public.hero_slides
+       ORDER BY sort_order ASC, updated_at DESC`
+    );
     const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: true })));
     return res.json({ success: true, items });
   } catch (e) {
@@ -1981,13 +1934,13 @@ app.get("/admin/hero", requireAdmin, async (req, res) => {
   }
 });
 
-/* ---- ADMIN create (multipart: image) ---- */
+/* ---- ADMIN create (accepts multipart image OR image_key from upload endpoint) ---- */
 app.post(
   "/admin/hero",
   writeLimiter,
   requireAdmin,
   requireCsrf,
-  upload.single("image"),
+  upload.single("image"), // if multipart, "image" field works; if JSON, multer ignores it
   validate(HeroCreateSchema),
   async (req, res) => {
     let uploadedKey = "";
@@ -2000,7 +1953,7 @@ app.post(
       const payload = { ...req.body };
 
       const ins = await dbQuery(
-        `INSERT INTO homepage_hero (title, description, link_url, sort_order, is_active, payload)
+        `INSERT INTO public.hero_slides (title, description, link_url, sort_order, is_active, payload)
          VALUES ($1,$2,$3,$4,$5,$6)
          RETURNING *`,
         [title, description, linkUrl, sortOrder, isActive, payload]
@@ -2008,6 +1961,7 @@ app.post(
 
       let row = ins.rows[0];
 
+      // Option A: file upload in same request
       if (req.file?.buffer) {
         const up = await uploadHeroImageToSupabase({
           buffer: req.file.buffer,
@@ -2015,15 +1969,20 @@ app.post(
           heroId: row.id,
         });
         uploadedKey = up.key;
+      }
 
+      // Option B: key from /admin/hero/upload
+      const bodyKey = String(req.body.image_key || req.body.key || "").trim();
+      const finalKey = uploadedKey || bodyKey;
+
+      if (finalKey) {
         const upd = await dbQuery(
-          `UPDATE homepage_hero
+          `UPDATE public.hero_slides
            SET image_key=$1, updated_at=NOW(), payload=$2
            WHERE id=$3
            RETURNING *`,
-          [uploadedKey, { ...payload, __image_key: uploadedKey }, row.id]
+          [finalKey, { ...payload, __image_key: finalKey }, row.id]
         );
-
         row = upd.rows[0] || row;
       }
 
@@ -2037,7 +1996,7 @@ app.post(
   }
 );
 
-/* ---- ADMIN update (optional new image) ---- */
+/* ---- ADMIN update (optional new image, or set image_key, or remove_image) ---- */
 app.put(
   "/admin/hero/:id",
   writeLimiter,
@@ -2050,7 +2009,7 @@ app.put(
     let newKey = "";
     try {
       const id = Number(req.params.id);
-      const cur = await dbQuery(`SELECT * FROM homepage_hero WHERE id=$1 LIMIT 1`, [id]);
+      const cur = await dbQuery(`SELECT * FROM public.hero_slides WHERE id=$1 LIMIT 1`, [id]);
       if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
 
       const existing = cur.rows[0];
@@ -2069,6 +2028,14 @@ app.put(
       const removeImage = String(req.body.remove_image || "").toLowerCase() === "true";
       if (removeImage && imageKey) { await deleteSupabaseKey(imageKey); imageKey = ""; }
 
+      // allow setting image_key directly (from /admin/hero/upload)
+      const bodyKey = String(req.body.image_key || req.body.key || "").trim();
+      if (bodyKey) {
+        // if you want to delete old key when swapping, do it here
+        if (imageKey && imageKey !== bodyKey) await deleteSupabaseKey(imageKey);
+        imageKey = bodyKey;
+      }
+
       if (req.file?.buffer) {
         const up = await uploadHeroImageToSupabase({
           buffer: req.file.buffer,
@@ -2081,8 +2048,15 @@ app.put(
       }
 
       const upd = await dbQuery(
-        `UPDATE homepage_hero
-         SET title=$1, description=$2, link_url=$3, sort_order=$4, is_active=$5, image_key=$6, updated_at=NOW(), payload=$7
+        `UPDATE public.hero_slides
+         SET title=$1
+           , description=$2
+           , link_url=$3
+           , sort_order=$4
+           , is_active=$5
+           , image_key=$6
+           , updated_at=NOW()
+           , payload=$7
          WHERE id=$8
          RETURNING *`,
         [title, description, linkUrl, sortOrder, isActive, imageKey || null, payload, id]
@@ -2108,13 +2082,13 @@ app.delete(
   async (req, res) => {
     try {
       const id = Number(req.params.id);
-      const cur = await dbQuery(`SELECT * FROM homepage_hero WHERE id=$1 LIMIT 1`, [id]);
+      const cur = await dbQuery(`SELECT * FROM public.hero_slides WHERE id=$1 LIMIT 1`, [id]);
       if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
 
       const key = String(cur.rows[0].image_key || "").trim();
       if (key) await deleteSupabaseKey(key);
 
-      await dbQuery(`DELETE FROM homepage_hero WHERE id=$1`, [id]);
+      await dbQuery(`DELETE FROM public.hero_slides WHERE id=$1`, [id]);
       return res.json({ success: true });
     } catch (e) {
       logError("hero.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
