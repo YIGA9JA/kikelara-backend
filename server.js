@@ -27,7 +27,9 @@
 //
 // Reviews (optional):
 //  - product_reviews (id, product_id text, name, title, text, rating int, verified bool, device_id text, created_at)
+//    RECOMMENDED UNIQUE: (product_id, device_id) for ON CONFLICT to work
 //  - review_votes (id, review_id bigint, device_id text, vote_type text, created_at)
+//    RECOMMENDED UNIQUE: (review_id, device_id) for ON CONFLICT to work
 //
 // NOTE: Node 18+ recommended (built-in fetch). If older: install node-fetch.
 
@@ -167,6 +169,65 @@ function safeQuery(req) {
   return out;
 }
 
+/* ===================== REQUEST ID (MUST BE EARLY) ===================== */
+app.use((req, res, next) => {
+  const rid = makeRid();
+  req.rid = rid;
+  res.setHeader("X-Request-Id", rid);
+  next();
+});
+
+/* ===================== CORS (MOVED EARLY — IMPORTANT FOR CREDENTIALS) ===================== */
+const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const ALLOW_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://127.0.0.1:5500",
+  "http://localhost:5500",
+
+  // your vercel(s)
+  "https://kikelara1.vercel.app",
+  "https://www.kikelara1.vercel.app",
+
+  // (extra) common variant — does not break anything if unused
+  "https://kikelara.vercel.app",
+  "https://www.kikelara.vercel.app",
+
+  ...FRONTEND_ORIGINS,
+];
+
+function originAllowed(origin) {
+  if (!origin) return true; // server-to-server, curl
+  return ALLOW_ORIGINS.includes(origin);
+}
+
+const corsOptions = {
+  origin: function (origin, cb) {
+    if (originAllowed(origin)) return cb(null, true);
+    return cb(new Error("Not allowed by CORS: " + origin));
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Accept",
+    "X-CSRF-Token",
+    "x-csrf-token",
+    "x-paystack-signature",
+    "Authorization",
+  ],
+  exposedHeaders: ["X-Request-Id"],
+  credentials: true,
+  optionsSuccessStatus: 204,
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
+
 /* ===================== TEMP BAN (LIGHT) ===================== */
 const banMap = new Map();
 function isBanned(ip) {
@@ -183,22 +244,19 @@ function banIp(ip, minutes, reason) {
   logWarn("security.temp_ban", { ip, minutes, reason, until: new Date(until).toISOString(), hits });
 }
 
-/* ===================== REQUEST LOGGER ===================== */
+/* ===================== REQUEST LOGGER (AFTER CORS NOW) ===================== */
 app.use((req, res, next) => {
-  const rid = makeRid();
-  req.rid = rid;
-  res.setHeader("X-Request-Id", rid);
-
   const ip = getClientIp(req);
+
   if (isBanned(ip)) {
-    logWarn("security.banned_request", { rid, ip, method: req.method, path: req.originalUrl });
+    logWarn("security.banned_request", { rid: req.rid || "-", ip, method: req.method, path: req.originalUrl });
     return res.status(403).json({ success: false, message: "Access blocked. Try later." });
   }
 
   const start = process.hrtime.bigint();
 
   logInfo("http.req", {
-    rid,
+    rid: req.rid,
     ip,
     method: req.method,
     path: req.originalUrl,
@@ -209,7 +267,7 @@ app.use((req, res, next) => {
   res.on("finish", () => {
     const end = process.hrtime.bigint();
     const ms = Number(end - start) / 1e6;
-    const payload = { rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms) };
+    const payload = { rid: req.rid, ip, method: req.method, path: req.originalUrl, status: res.statusCode, ms: Math.round(ms) };
     if (res.statusCode >= 500) logError("http.res", payload);
     else if (res.statusCode >= 400) logWarn("http.res", payload);
     else logInfo("http.res", payload);
@@ -300,7 +358,10 @@ async function initDbCaps() {
 app.use((req, res, next) => {
   if (IS_PROD) {
     const proto = req.headers["x-forwarded-proto"];
-    if (proto && proto !== "https") return res.redirect(301, "https://" + req.headers.host + req.originalUrl);
+    // NOTE: Do NOT redirect OPTIONS; keep preflight clean
+    if (proto && proto !== "https" && req.method !== "OPTIONS") {
+      return res.redirect(301, "https://" + req.headers.host + req.originalUrl);
+    }
   }
   next();
 });
@@ -316,6 +377,7 @@ app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
   next();
 });
 
@@ -329,6 +391,10 @@ function rateLimitWithSecurityLog(name, opts) {
     ...opts,
     standardHeaders: true,
     legacyHeaders: false,
+
+    // ✅ IMPORTANT: don't rate-limit OPTIONS preflight (prevents random CORS failures)
+    skip: (req) => String(req.method || "").toUpperCase() === "OPTIONS",
+
     handler: (req, res) => {
       const ip = getClientIp(req);
       logWarn("security.rate_limit_429", { rid: req.rid || "-", limiter: name, ip, method: req.method, path: req.originalUrl });
@@ -343,48 +409,16 @@ const authLimiter = rateLimitWithSecurityLog("auth", { windowMs: 10 * 60 * 1000,
 const writeLimiter = rateLimitWithSecurityLog("write", { windowMs: 5 * 60 * 1000, max: 80 });
 
 const speedLimiter = slowDown
-  ? slowDown({ windowMs: 15 * 60 * 1000, delayAfter: 120, delayMs: () => 250 })
+  ? slowDown({
+      windowMs: 15 * 60 * 1000,
+      delayAfter: 120,
+      delayMs: () => 250,
+      skip: (req) => String(req.method || "").toUpperCase() === "OPTIONS",
+    })
   : (req, res, next) => next();
 
 app.use(globalLimiter);
 app.use(speedLimiter);
-
-/* ===================== CORS (CREDENTIALS READY) ===================== */
-const FRONTEND_ORIGINS = (process.env.FRONTEND_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const ALLOW_ORIGINS = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://127.0.0.1:5500",
-  "http://localhost:5500",
-  "https://kikelara1.vercel.app",
-  "https://www.kikelara1.vercel.app",
-  ...FRONTEND_ORIGINS,
-];
-
-function originAllowed(origin) {
-  if (!origin) return true; // server-to-server, curl
-  return ALLOW_ORIGINS.includes(origin);
-}
-
-const corsOptions = {
-  origin: function (origin, cb) {
-    if (originAllowed(origin)) return cb(null, true);
-    return cb(new Error("Not allowed by CORS: " + origin));
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Accept", "X-CSRF-Token", "x-csrf-token", "x-paystack-signature"],
-  exposedHeaders: ["X-Request-Id"],
-  credentials: true,
-  optionsSuccessStatus: 204,
-  maxAge: 86400,
-};
-
-app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
 
 /* ===================== COOKIE PARSER ===================== */
 app.use(cookieParser(ADMIN_SECRET));
@@ -421,7 +455,6 @@ async function verifyPaystack(reference) {
 }
 
 async function recordPaystackEventOnce({ eventId, reference, eventType, payload, signature }) {
-  // requires paystack_events table (recommended)
   const r = await dbQuery(
     `insert into paystack_events (event_id, reference, event_type, payload, signature)
      values ($1,$2,$3,$4,$5)
@@ -457,7 +490,6 @@ app.post("/payments/paystack/webhook", express.raw({ type: "application/json", l
 
     const eventId = String(event?.id || data?.id || data?.transaction || "").trim() || `no_event_id:${reference}:${evtType}`;
 
-    // If paystack_events table isn't installed, this will throw; we ignore safely.
     let firstTime = true;
     try {
       firstTime = await recordPaystackEventOnce({ eventId, reference, eventType: evtType, payload: event, signature: sig });
@@ -703,6 +735,16 @@ setInterval(cleanupJti, 60 * 1000).unref?.();
 
 function getAdminTokenFromCookie(req) {
   return String(req.cookies?.[COOKIE_NAME] || "");
+}
+
+function isAdminAuthed(req) {
+  const token = getAdminTokenFromCookie(req);
+  const payload = verifyToken(token);
+  if (!payload || payload.role !== "admin") return false;
+  if (!payload.jti) return false;
+  const exp = adminJtiMap.get(payload.jti);
+  if (!exp || Date.now() > exp) return false;
+  return true;
 }
 
 function requireAdmin(req, res, next) {
@@ -1068,7 +1110,10 @@ app.get("/admin/media/list", requireAdmin, async (req, res) => {
 app.get("/api/products", async (req, res) => {
   try {
     await ensureCapsLoaded("products");
-    const includeAll = String(req.query.all || "").toLowerCase() === "true";
+
+    // ✅ Security: ?all=true now requires admin session
+    const askedAll = String(req.query.all || "").toLowerCase() === "true";
+    const includeAll = askedAll && isAdminAuthed(req);
 
     const sql = includeAll
       ? `SELECT * FROM products ORDER BY created_at DESC`
