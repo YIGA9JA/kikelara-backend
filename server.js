@@ -1861,20 +1861,113 @@ const HeroUpdateSchema = z.object({
 }).passthrough();
 
 /* ---- PUBLIC hero slides ---- */
+// PUBLIC HERO (homepage)
 app.get("/api/hero", async (req, res) => {
   try {
-    const r = await dbQuery(
-      `SELECT * FROM homepage_hero
-       WHERE is_active=true
-       ORDER BY sort_order ASC, updated_at DESC`
+    const { rows } = await pool.query(
+      `select id, title, description, link_url, image_url, sort_order
+       from public.hero_items
+       where is_active = true
+       order by sort_order asc, created_at desc
+       limit 20`
     );
-    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: false })));
-    return res.json({ ok: true, items });
+    res.json({ success: true, items: rows });
   } catch (e) {
-    logError("hero.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    return res.json({ ok: true, items: [] });
+    res.status(500).json({ success: false, message: "Failed to load hero" });
   }
 });
+
+// ADMIN HERO CRUD
+app.get("/admin/hero", requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `select id, title, description, link_url, image_url, sort_order, is_active, created_at
+       from public.hero_items
+       order by sort_order asc, created_at asc`
+    );
+    res.json({ success: true, items: rows });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to load hero" });
+  }
+});
+
+app.post("/admin/hero", requireAdmin, async (req, res) => {
+  try {
+    const {
+      title = "",
+      description = "",
+      link_url = "",
+      image_url,
+      sort_order = 0,
+      is_active = true
+    } = req.body || {};
+
+    if (!image_url) return res.status(400).json({ success:false, message:"image_url is required" });
+
+    const { rows } = await pool.query(
+      `insert into public.hero_items (title, description, link_url, image_url, sort_order, is_active)
+       values ($1,$2,$3,$4,$5,$6)
+       returning *`,
+      [title, description, link_url, image_url, Number(sort_order || 0), !!is_active]
+    );
+
+    res.json({ success: true, item: rows[0] });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to create slide" });
+  }
+});
+
+app.put("/admin/hero/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const {
+      title,
+      description,
+      link_url,
+      image_url,
+      sort_order,
+      is_active
+    } = req.body || {};
+
+    const { rows } = await pool.query(
+      `update public.hero_items
+       set title = $1,
+           description = $2,
+           link_url = $3,
+           image_url = $4,
+           sort_order = $5,
+           is_active = $6
+       where id = $7
+       returning *`,
+      [
+        String(title || ""),
+        String(description || ""),
+        String(link_url || ""),
+        String(image_url || ""),
+        Number(sort_order || 0),
+        !!is_active,
+        id
+      ]
+    );
+
+    if (!rows[0]) return res.status(404).json({ success:false, message:"Not found" });
+    res.json({ success: true, item: rows[0] });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to update slide" });
+  }
+});
+
+app.delete("/admin/hero/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { rowCount } = await pool.query(`delete from public.hero_items where id=$1`, [id]);
+    if (!rowCount) return res.status(404).json({ success:false, message:"Not found" });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, message: "Failed to delete slide" });
+  }
+});
+
 
 /* ---- ADMIN list ---- */
 app.get("/admin/hero", requireAdmin, async (req, res) => {
