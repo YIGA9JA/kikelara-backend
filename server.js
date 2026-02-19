@@ -647,6 +647,30 @@ async function uploadFeaturedImageToSupabase({ buffer, originalName, featuredId 
   const webpBuf = await toWebpWideBuffer(buffer);
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
+async function toWebpHeroBuffer(buf) {
+  // 16:9 hero (crisp on desktop + mobile)
+  return sharp(buf).rotate().resize(2400, 1350, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
+}
+
+async function uploadHeroImageToSupabase({ buffer, originalName, heroId }) {
+  ensureSupabaseReady();
+  const base = safeKeyPart(originalName);
+  const key = `hero/${heroId}/${Date.now()}_${base}.webp`;
+  const webpBuf = await toWebpHeroBuffer(buffer);
+  return uploadKeyToSupabase({ buffer: webpBuf, key });
+}
+
+async function withSignedHero(row, { includeKeys = false } = {}) {
+  const r = { ...row };
+  const key = String(row?.image_key || "").trim();
+  r.image_url = "";
+  if (key) {
+    try { r.image_url = await signKey(key); } catch { r.image_url = ""; }
+  }
+  if (includeKeys) r.image_key = key;
+  return r;
+}
+
 
 async function signKey(key) {
   ensureSupabaseReady();
@@ -1811,6 +1835,196 @@ app.delete(
       return res.json({ success: true });
     } catch (e) {
       logError("featured.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+      return res.status(500).json({ success: false, message: "Delete failed" });
+    }
+  }
+);
+/* ===================== HERO SLIDES (HOMEPAGE) ===================== */
+
+const HeroIdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
+
+const HeroCreateSchema = z.object({
+  title: z.string().trim().max(140).optional().default(""),
+  description: z.string().trim().max(500).optional().default(""),
+  link_url: z.string().trim().max(500).optional().default(""),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional().default(0),
+  is_active: z.string().optional(),
+}).passthrough();
+
+const HeroUpdateSchema = z.object({
+  title: z.string().trim().max(140).optional(),
+  description: z.string().trim().max(500).optional(),
+  link_url: z.string().trim().max(500).optional(),
+  sort_order: z.coerce.number().int().min(0).max(9999).optional(),
+  is_active: z.string().optional(),
+  remove_image: z.string().optional(),
+}).passthrough();
+
+/* ---- PUBLIC hero slides ---- */
+app.get("/api/hero", async (req, res) => {
+  try {
+    const r = await dbQuery(
+      `SELECT * FROM homepage_hero
+       WHERE is_active=true
+       ORDER BY sort_order ASC, updated_at DESC`
+    );
+    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: false })));
+    return res.json({ ok: true, items });
+  } catch (e) {
+    logError("hero.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.json({ ok: true, items: [] });
+  }
+});
+
+/* ---- ADMIN list ---- */
+app.get("/admin/hero", requireAdmin, async (req, res) => {
+  try {
+    const r = await dbQuery(`SELECT * FROM homepage_hero ORDER BY sort_order ASC, updated_at DESC`);
+    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: true })));
+    return res.json({ success: true, items });
+  } catch (e) {
+    logError("hero.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
+    return res.status(500).json({ success: false, items: [] });
+  }
+});
+
+/* ---- ADMIN create (multipart: image) ---- */
+app.post(
+  "/admin/hero",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  upload.single("image"),
+  validate(HeroCreateSchema),
+  async (req, res) => {
+    let uploadedKey = "";
+    try {
+      const title = String(req.body.title || "").trim();
+      const description = String(req.body.description || "").trim();
+      const linkUrl = String(req.body.link_url || "").trim();
+      const sortOrder = Math.max(0, Math.round(Number(req.body.sort_order || 0)));
+      const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
+      const payload = { ...req.body };
+
+      const ins = await dbQuery(
+        `INSERT INTO homepage_hero (title, description, link_url, sort_order, is_active, payload)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING *`,
+        [title, description, linkUrl, sortOrder, isActive, payload]
+      );
+
+      let row = ins.rows[0];
+
+      if (req.file?.buffer) {
+        const up = await uploadHeroImageToSupabase({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+          heroId: row.id,
+        });
+        uploadedKey = up.key;
+
+        const upd = await dbQuery(
+          `UPDATE homepage_hero
+           SET image_key=$1, updated_at=NOW(), payload=$2
+           WHERE id=$3
+           RETURNING *`,
+          [uploadedKey, { ...payload, __image_key: uploadedKey }, row.id]
+        );
+
+        row = upd.rows[0] || row;
+      }
+
+      const signed = await withSignedHero(row, { includeKeys: true });
+      return res.json({ success: true, item: signed });
+    } catch (e) {
+      if (uploadedKey) await deleteSupabaseKey(uploadedKey);
+      logError("hero.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Create hero failed" });
+    }
+  }
+);
+
+/* ---- ADMIN update (optional new image) ---- */
+app.put(
+  "/admin/hero/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  upload.single("image"),
+  validate(HeroIdParamSchema, "params"),
+  validate(HeroUpdateSchema),
+  async (req, res) => {
+    let newKey = "";
+    try {
+      const id = Number(req.params.id);
+      const cur = await dbQuery(`SELECT * FROM homepage_hero WHERE id=$1 LIMIT 1`, [id]);
+      if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
+
+      const existing = cur.rows[0];
+
+      const title = req.body.title === undefined ? String(existing.title || "") : String(req.body.title || "");
+      const description = req.body.description === undefined ? String(existing.description || "") : String(req.body.description || "");
+      const linkUrl = req.body.link_url === undefined ? String(existing.link_url || "") : String(req.body.link_url || "");
+      const sortOrder = req.body.sort_order === undefined ? Number(existing.sort_order || 0) : Math.max(0, Math.round(Number(req.body.sort_order)));
+      const isActive = req.body.is_active === undefined ? Boolean(existing.is_active) : String(req.body.is_active).toLowerCase() !== "false";
+
+      let imageKey = String(existing.image_key || "").trim();
+      const payload = existing.payload && typeof existing.payload === "object"
+        ? { ...existing.payload, ...req.body }
+        : { ...req.body };
+
+      const removeImage = String(req.body.remove_image || "").toLowerCase() === "true";
+      if (removeImage && imageKey) { await deleteSupabaseKey(imageKey); imageKey = ""; }
+
+      if (req.file?.buffer) {
+        const up = await uploadHeroImageToSupabase({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+          heroId: id,
+        });
+        newKey = up.key;
+        if (imageKey) await deleteSupabaseKey(imageKey);
+        imageKey = newKey;
+      }
+
+      const upd = await dbQuery(
+        `UPDATE homepage_hero
+         SET title=$1, description=$2, link_url=$3, sort_order=$4, is_active=$5, image_key=$6, updated_at=NOW(), payload=$7
+         WHERE id=$8
+         RETURNING *`,
+        [title, description, linkUrl, sortOrder, isActive, imageKey || null, payload, id]
+      );
+
+      const signed = await withSignedHero(upd.rows[0], { includeKeys: true });
+      return res.json({ success: true, item: signed });
+    } catch (e) {
+      if (newKey) await deleteSupabaseKey(newKey);
+      logError("hero.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
+      return res.status(500).json({ success: false, message: "Update hero failed" });
+    }
+  }
+);
+
+/* ---- ADMIN delete ---- */
+app.delete(
+  "/admin/hero/:id",
+  writeLimiter,
+  requireAdmin,
+  requireCsrf,
+  validate(HeroIdParamSchema, "params"),
+  async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const cur = await dbQuery(`SELECT * FROM homepage_hero WHERE id=$1 LIMIT 1`, [id]);
+      if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
+
+      const key = String(cur.rows[0].image_key || "").trim();
+      if (key) await deleteSupabaseKey(key);
+
+      await dbQuery(`DELETE FROM homepage_hero WHERE id=$1`, [id]);
+      return res.json({ success: true });
+    } catch (e) {
+      logError("hero.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
       return res.status(500).json({ success: false, message: "Delete failed" });
     }
   }
