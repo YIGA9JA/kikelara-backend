@@ -1840,93 +1840,178 @@ app.delete(
   }
 );
 /* ===================== HERO SLIDES (HOMEPAGE) ===================== */
-/* ===================== HERO SLIDES (HOMEPAGE) ===================== */
+/* ✅ Fixes:
+   - removes payload usage (your hero_slides table has no payload column)
+   - supports JSON boolean is_active (fixes “Validation failed”)
+   - adds /admin/hero/upload endpoint (what admin-hero.js expects)
+   - returns image_url_key + image_url_signed for admin UI
+   - returns signed image_url for public /api/hero
+*/
 
+const HERO_TABLE_CANDIDATES = [
+  process.env.HERO_TABLE,   // optional override
+  "hero_slides",
+  "homepage_hero",
+  "hero_items",
+].filter(Boolean);
+
+let HERO_TABLE = null;
+
+async function resolveHeroTable() {
+  if (HERO_TABLE) return HERO_TABLE;
+  for (const t of HERO_TABLE_CANDIDATES) {
+    try {
+      if (await tableExists(t)) { HERO_TABLE = t; return HERO_TABLE; }
+    } catch {}
+  }
+  // default fallback (will error if it truly doesn't exist)
+  HERO_TABLE = "hero_slides";
+  return HERO_TABLE;
+}
+
+function boolish(v, def = true) {
+  if (v === undefined || v === null) return def;
+  if (typeof v === "boolean") return v;
+  return String(v).toLowerCase() !== "false";
+}
+
+async function signIfKey(val) {
+  const v = String(val || "").trim();
+  if (!v) return "";
+  if (!looksLikeStorageKey(v)) return v; // already URL or /uploads/...
+  try { return await signKey(v); } catch { return ""; }
+}
+
+// ✅ JSON body schemas (accept boolean)
 const HeroIdParamSchema = z.object({ id: z.coerce.number().int().positive("Invalid id") });
 
-const HeroCreateSchema = z.object({
+const HeroCreateJsonSchema = z.object({
   title: z.string().trim().max(140).optional().default(""),
   description: z.string().trim().max(500).optional().default(""),
   link_url: z.string().trim().max(500).optional().default(""),
   sort_order: z.coerce.number().int().min(0).max(9999).optional().default(0),
-  is_active: z.string().optional(),
+  image_url: z.string().trim().min(1, "Missing image_url").max(5000),
+  is_active: z.union([z.boolean(), z.string()]).optional(),
 }).passthrough();
 
-const HeroUpdateSchema = z.object({
+const HeroUpdateJsonSchema = z.object({
   title: z.string().trim().max(140).optional(),
   description: z.string().trim().max(500).optional(),
   link_url: z.string().trim().max(500).optional(),
   sort_order: z.coerce.number().int().min(0).max(9999).optional(),
-  is_active: z.string().optional(),
-  remove_image: z.string().optional(),
-  image_key: z.string().optional(), // allow setting from /admin/hero/upload
+  image_url: z.string().trim().min(1).max(5000).optional(),
+  is_active: z.union([z.boolean(), z.string()]).optional(),
 }).passthrough();
 
-/**
- * ✅ IMPORTANT:
- * This code uses ONE table: public.hero_slides
- * Columns expected:
- *  id, title, description, link_url, image_key, image_url, sort_order, is_active, created_at, updated_at, payload
- *
- * If you haven't created it yet, use the SQL I gave you earlier for hero_slides.
- */
-
-/* ---- ADMIN: upload only (fixes your 404) ----
-   Frontend can call this first, then POST /admin/hero with image_key.
-*/
+/* ---- ADMIN: upload image (expected by admin-hero.js) ---- */
 app.post(
   "/admin/hero/upload",
   writeLimiter,
   requireAdmin,
   requireCsrf,
-  upload.any(), // accept file under any field name ("file", "image", etc.)
+  upload.single("file"),
   async (req, res) => {
+    let uploadedKey = "";
     try {
-      const f = req.files?.[0];
-      if (!f?.buffer) return res.status(400).json({ success: false, message: "No file uploaded" });
+      if (!req.file?.buffer) return res.status(400).json({ success: false, message: "Missing file" });
 
+      const t = await resolveHeroTable(); // not strictly needed but keeps flow consistent
+      void t;
+
+      // Upload into Supabase Storage (uses existing helper)
       const up = await uploadHeroImageToSupabase({
-        buffer: f.buffer,
-        originalName: f.originalname,
-        heroId: "draft", // goes to hero/draft/...
+        buffer: req.file.buffer,
+        originalName: req.file.originalname,
+        heroId: "tmp",
       });
+      uploadedKey = up.key;
 
-      let signedUrl = "";
-      try { signedUrl = await signKey(up.key); } catch {}
-
-      return res.json({ success: true, key: up.key, path: up.key, signedUrl });
+      const signedUrl = await signIfKey(uploadedKey);
+      return res.json({
+        success: true,
+        key: uploadedKey,
+        path: uploadedKey,           // admin-hero.js prefers `path` for saving
+        signedUrl,
+        url: signedUrl,              // optional convenience
+        image_url: signedUrl,        // optional convenience
+      });
     } catch (e) {
+      if (uploadedKey) await deleteSupabaseKey(uploadedKey);
       logError("hero.upload_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
       return res.status(500).json({ success: false, message: "Upload failed" });
     }
   }
 );
 
-/* ---- PUBLIC list ---- */
+/* ---- PUBLIC hero slides ---- */
 app.get("/api/hero", async (req, res) => {
   try {
+    const table = await resolveHeroTable();
+
     const r = await dbQuery(
-      `SELECT * FROM public.hero_slides
+      `SELECT id, title, description, link_url, image_url, sort_order, is_active, created_at
+       FROM ${table}
        WHERE is_active=true
-       ORDER BY sort_order ASC, updated_at DESC
+       ORDER BY sort_order ASC, created_at DESC
        LIMIT 20`
     );
-    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: false })));
-    return res.json({ success: true, items });
+
+    const items = await Promise.all(
+      (r.rows || []).map(async (row) => {
+        const key = String(row.image_url || "").trim();
+        const signed = await signIfKey(key);
+        return {
+          id: row.id,
+          title: row.title || "",
+          description: row.description || "",
+          link_url: row.link_url || "",
+          sort_order: Number(row.sort_order || 0),
+          is_active: Boolean(row.is_active),
+          created_at: row.created_at || null,
+          image_url: signed || key, // ✅ public must be usable URL
+        };
+      })
+    );
+
+    res.json({ success: true, items });
   } catch (e) {
     logError("hero.public_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
-    return res.json({ success: true, items: [] });
+    res.status(500).json({ success: false, items: [] });
   }
 });
 
 /* ---- ADMIN list ---- */
 app.get("/admin/hero", requireAdmin, async (req, res) => {
   try {
+    const table = await resolveHeroTable();
+
     const r = await dbQuery(
-      `SELECT * FROM public.hero_slides
-       ORDER BY sort_order ASC, updated_at DESC`
+      `SELECT id, title, description, link_url, image_url, sort_order, is_active, created_at
+       FROM ${table}
+       ORDER BY sort_order ASC, created_at ASC`
     );
-    const items = await Promise.all(r.rows.map((x) => withSignedHero(x, { includeKeys: true })));
+
+    const items = await Promise.all(
+      (r.rows || []).map(async (row) => {
+        const key = String(row.image_url || "").trim();
+        const signed = await signIfKey(key);
+        return {
+          id: row.id,
+          title: row.title || "",
+          description: row.description || "",
+          link_url: row.link_url || "",
+          sort_order: Number(row.sort_order || 0),
+          is_active: Boolean(row.is_active),
+          created_at: row.created_at || null,
+
+          // ✅ admin needs BOTH:
+          image_url_key: key,                 // persisted value (key or url)
+          image_url_signed: signed || "",     // for preview image
+          image_url: key,                     // keep backward compatibility
+        };
+      })
+    );
+
     return res.json({ success: true, items });
   } catch (e) {
     logError("hero.admin_list_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
@@ -1934,138 +2019,130 @@ app.get("/admin/hero", requireAdmin, async (req, res) => {
   }
 });
 
-/* ---- ADMIN create (accepts multipart image OR image_key from upload endpoint) ---- */
+/* ---- ADMIN create (JSON) ---- */
 app.post(
   "/admin/hero",
   writeLimiter,
   requireAdmin,
   requireCsrf,
-  upload.single("image"), // if multipart, "image" field works; if JSON, multer ignores it
-  validate(HeroCreateSchema),
+  validate(HeroCreateJsonSchema),
   async (req, res) => {
-    let uploadedKey = "";
     try {
+      const table = await resolveHeroTable();
+
       const title = String(req.body.title || "").trim();
       const description = String(req.body.description || "").trim();
       const linkUrl = String(req.body.link_url || "").trim();
       const sortOrder = Math.max(0, Math.round(Number(req.body.sort_order || 0)));
-      const isActive = String(req.body.is_active || "true").toLowerCase() !== "false";
-      const payload = { ...req.body };
+      const isActive = boolish(req.body.is_active, true);
+
+      const imageUrlKey = String(req.body.image_url || "").trim();
+      if (!imageUrlKey) return res.status(400).json({ success: false, message: "image_url is required" });
 
       const ins = await dbQuery(
-        `INSERT INTO public.hero_slides (title, description, link_url, sort_order, is_active, payload)
+        `INSERT INTO ${table} (title, description, link_url, image_url, sort_order, is_active)
          VALUES ($1,$2,$3,$4,$5,$6)
-         RETURNING *`,
-        [title, description, linkUrl, sortOrder, isActive, payload]
+         RETURNING id, title, description, link_url, image_url, sort_order, is_active, created_at`,
+        [title, description, linkUrl, imageUrlKey, sortOrder, isActive]
       );
 
-      let row = ins.rows[0];
+      const row = ins.rows?.[0];
+      const signed = await signIfKey(row?.image_url);
 
-      // Option A: file upload in same request
-      if (req.file?.buffer) {
-        const up = await uploadHeroImageToSupabase({
-          buffer: req.file.buffer,
-          originalName: req.file.originalname,
-          heroId: row.id,
-        });
-        uploadedKey = up.key;
-      }
-
-      // Option B: key from /admin/hero/upload
-      const bodyKey = String(req.body.image_key || req.body.key || "").trim();
-      const finalKey = uploadedKey || bodyKey;
-
-      if (finalKey) {
-        const upd = await dbQuery(
-          `UPDATE public.hero_slides
-           SET image_key=$1, updated_at=NOW(), payload=$2
-           WHERE id=$3
-           RETURNING *`,
-          [finalKey, { ...payload, __image_key: finalKey }, row.id]
-        );
-        row = upd.rows[0] || row;
-      }
-
-      const signed = await withSignedHero(row, { includeKeys: true });
-      return res.json({ success: true, item: signed });
+      return res.json({
+        success: true,
+        item: {
+          id: row.id,
+          title: row.title || "",
+          description: row.description || "",
+          link_url: row.link_url || "",
+          sort_order: Number(row.sort_order || 0),
+          is_active: Boolean(row.is_active),
+          created_at: row.created_at || null,
+          image_url_key: String(row.image_url || ""),
+          image_url_signed: signed || "",
+          image_url: String(row.image_url || ""),
+        },
+      });
     } catch (e) {
-      if (uploadedKey) await deleteSupabaseKey(uploadedKey);
       logError("hero.create_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
       return res.status(500).json({ success: false, message: "Create hero failed" });
     }
   }
 );
 
-/* ---- ADMIN update (optional new image, or set image_key, or remove_image) ---- */
+/* ---- ADMIN update (JSON) ---- */
 app.put(
   "/admin/hero/:id",
   writeLimiter,
   requireAdmin,
   requireCsrf,
-  upload.single("image"),
   validate(HeroIdParamSchema, "params"),
-  validate(HeroUpdateSchema),
+  validate(HeroUpdateJsonSchema),
   async (req, res) => {
-    let newKey = "";
     try {
+      const table = await resolveHeroTable();
       const id = Number(req.params.id);
-      const cur = await dbQuery(`SELECT * FROM public.hero_slides WHERE id=$1 LIMIT 1`, [id]);
+
+      const cur = await dbQuery(
+        `SELECT id, image_url FROM ${table} WHERE id=$1 LIMIT 1`,
+        [id]
+      );
       if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
 
-      const existing = cur.rows[0];
+      const oldKey = String(cur.rows[0].image_url || "").trim();
 
-      const title = req.body.title === undefined ? String(existing.title || "") : String(req.body.title || "");
-      const description = req.body.description === undefined ? String(existing.description || "") : String(req.body.description || "");
-      const linkUrl = req.body.link_url === undefined ? String(existing.link_url || "") : String(req.body.link_url || "");
-      const sortOrder = req.body.sort_order === undefined ? Number(existing.sort_order || 0) : Math.max(0, Math.round(Number(req.body.sort_order)));
-      const isActive = req.body.is_active === undefined ? Boolean(existing.is_active) : String(req.body.is_active).toLowerCase() !== "false";
+      const sets = [];
+      const vals = [];
+      let i = 0;
 
-      let imageKey = String(existing.image_key || "").trim();
-      const payload = existing.payload && typeof existing.payload === "object"
-        ? { ...existing.payload, ...req.body }
-        : { ...req.body };
+      if (req.body.title !== undefined) { sets.push(`title=$${++i}`); vals.push(String(req.body.title || "").trim()); }
+      if (req.body.description !== undefined) { sets.push(`description=$${++i}`); vals.push(String(req.body.description || "").trim()); }
+      if (req.body.link_url !== undefined) { sets.push(`link_url=$${++i}`); vals.push(String(req.body.link_url || "").trim()); }
+      if (req.body.sort_order !== undefined) { sets.push(`sort_order=$${++i}`); vals.push(Math.max(0, Math.round(Number(req.body.sort_order || 0)))); }
+      if (req.body.is_active !== undefined) { sets.push(`is_active=$${++i}`); vals.push(boolish(req.body.is_active, true)); }
+      if (req.body.image_url !== undefined) { sets.push(`image_url=$${++i}`); vals.push(String(req.body.image_url || "").trim()); }
 
-      const removeImage = String(req.body.remove_image || "").toLowerCase() === "true";
-      if (removeImage && imageKey) { await deleteSupabaseKey(imageKey); imageKey = ""; }
+      if (!sets.length) return res.json({ success: true });
 
-      // allow setting image_key directly (from /admin/hero/upload)
-      const bodyKey = String(req.body.image_key || req.body.key || "").trim();
-      if (bodyKey) {
-        // if you want to delete old key when swapping, do it here
-        if (imageKey && imageKey !== bodyKey) await deleteSupabaseKey(imageKey);
-        imageKey = bodyKey;
-      }
+      // if table has updated_at column, update it
+      // (safe: if it doesn't exist, Postgres will error; so we skip that)
+      // We'll just rely on your trigger if you made one.
 
-      if (req.file?.buffer) {
-        const up = await uploadHeroImageToSupabase({
-          buffer: req.file.buffer,
-          originalName: req.file.originalname,
-          heroId: id,
-        });
-        newKey = up.key;
-        if (imageKey) await deleteSupabaseKey(imageKey);
-        imageKey = newKey;
-      }
-
+      vals.push(id);
       const upd = await dbQuery(
-        `UPDATE public.hero_slides
-         SET title=$1
-           , description=$2
-           , link_url=$3
-           , sort_order=$4
-           , is_active=$5
-           , image_key=$6
-           , updated_at=NOW()
-           , payload=$7
-         WHERE id=$8
-         RETURNING *`,
-        [title, description, linkUrl, sortOrder, isActive, imageKey || null, payload, id]
+        `UPDATE ${table} SET ${sets.join(", ")} WHERE id=$${++i}
+         RETURNING id, title, description, link_url, image_url, sort_order, is_active, created_at`,
+        vals
       );
 
-      const signed = await withSignedHero(upd.rows[0], { includeKeys: true });
-      return res.json({ success: true, item: signed });
+      const row = upd.rows?.[0];
+      if (!row) return res.status(404).json({ success: false, message: "Not found" });
+
+      // delete old storage key if replaced
+      const newKey = String(row.image_url || "").trim();
+      if (oldKey && newKey && oldKey !== newKey && looksLikeStorageKey(oldKey)) {
+        await deleteSupabaseKey(oldKey);
+      }
+
+      const signed = await signIfKey(newKey);
+
+      return res.json({
+        success: true,
+        item: {
+          id: row.id,
+          title: row.title || "",
+          description: row.description || "",
+          link_url: row.link_url || "",
+          sort_order: Number(row.sort_order || 0),
+          is_active: Boolean(row.is_active),
+          created_at: row.created_at || null,
+          image_url_key: newKey,
+          image_url_signed: signed || "",
+          image_url: newKey,
+        },
+      });
     } catch (e) {
-      if (newKey) await deleteSupabaseKey(newKey);
       logError("hero.update_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 900) });
       return res.status(500).json({ success: false, message: "Update hero failed" });
     }
@@ -2081,14 +2158,23 @@ app.delete(
   validate(HeroIdParamSchema, "params"),
   async (req, res) => {
     try {
+      const table = await resolveHeroTable();
       const id = Number(req.params.id);
-      const cur = await dbQuery(`SELECT * FROM public.hero_slides WHERE id=$1 LIMIT 1`, [id]);
+
+      const cur = await dbQuery(
+        `SELECT id, image_url FROM ${table} WHERE id=$1 LIMIT 1`,
+        [id]
+      );
       if (!cur.rows.length) return res.status(404).json({ success: false, message: "Not found" });
 
-      const key = String(cur.rows[0].image_key || "").trim();
-      if (key) await deleteSupabaseKey(key);
+      const key = String(cur.rows[0].image_url || "").trim();
 
-      await dbQuery(`DELETE FROM public.hero_slides WHERE id=$1`, [id]);
+      await dbQuery(`DELETE FROM ${table} WHERE id=$1`, [id]);
+
+      if (key && looksLikeStorageKey(key)) {
+        await deleteSupabaseKey(key);
+      }
+
       return res.json({ success: true });
     } catch (e) {
       logError("hero.delete_failed", { rid: req.rid || "-", message: String(e?.message || e).slice(0, 600) });
