@@ -590,28 +590,50 @@ app.get("/db-test", async (req, res) => {
 
 /* ===================== MEDIA STORAGE (CLOUDINARY FIRST, SUPABASE FALLBACK) ===================== */
 
-// ✅ Cloudinary (FAST): public URLs, CDN cached, no signing cost per request
+// Assumes you have these imports somewhere above:
+//
+// const path = require("path");
+// const multer = require("multer");
+// const sharp = require("sharp");
+// const { createClient } = require("@supabase/supabase-js");
+// const cloudinary = require("cloudinary").v2;
+
+/* ===================== CLOUDINARY CONFIG ===================== */
+// ✅ Cloudinary env
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "";
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || "";
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || "";
 const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "kikelara";
 
-const CLOUDINARY_ENABLED =
+// ✅ URL generation needs ONLY cloud name
+const CLOUDINARY_URL_ENABLED = !!CLOUDINARY_CLOUD_NAME;
+
+// ✅ Upload/delete needs full credentials
+const CLOUDINARY_UPLOAD_ENABLED =
   !!(CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET);
 
-if (CLOUDINARY_ENABLED) {
+// ✅ Keep your old variable name for upload decision (backward compatible)
+const CLOUDINARY_ENABLED = CLOUDINARY_UPLOAD_ENABLED;
+
+// ✅ Always config if cloud name exists (so cloudinary.url() works reliably)
+if (CLOUDINARY_URL_ENABLED) {
   cloudinary.config({
     cloud_name: CLOUDINARY_CLOUD_NAME,
-    api_key: CLOUDINARY_API_KEY,
-    api_secret: CLOUDINARY_API_SECRET,
+    api_key: CLOUDINARY_API_KEY || undefined,
+    api_secret: CLOUDINARY_API_SECRET || undefined,
     secure: true,
   });
 }
 
-function ensureCloudinaryReady() {
-  if (!CLOUDINARY_ENABLED) {
+function ensureCloudinaryUrlReady() {
+  if (!CLOUDINARY_URL_ENABLED) {
+    throw new Error("Cloudinary not configured (missing CLOUDINARY_CLOUD_NAME)");
+  }
+}
+function ensureCloudinaryUploadReady() {
+  if (!CLOUDINARY_UPLOAD_ENABLED) {
     throw new Error(
-      "Cloudinary not configured (missing CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)"
+      "Cloudinary upload not configured (missing CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)"
     );
   }
 }
@@ -623,10 +645,12 @@ function cloudIdFromRef(k) {
   return String(k || "").replace(/^cld:/, "").trim();
 }
 
-/* ---- Supabase (fallback / legacy) ---- */
+/* ===================== SUPABASE (fallback / legacy) ===================== */
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
+
+// Signed URLs TTL (seconds)
 const SIGNED_URL_TTL_SECONDS = Math.max(
   60,
   Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)
@@ -663,10 +687,7 @@ function safeKeyPart(str, max = 40) {
 async function toWebpSquareBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(1080, 1080, {
-      fit: "cover",      // ✅ no padding
-      position: "centre" // safe default
-    })
+    .resize(1080, 1080, { fit: "cover", position: "centre" })
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -674,10 +695,7 @@ async function toWebpSquareBuffer(buf) {
 async function toWebpWideBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(2000, 1125, {
-      fit: "cover",      // ✅ no padding
-      position: "centre"
-    })
+    .resize(2000, 1125, { fit: "cover", position: "centre" })
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -685,30 +703,30 @@ async function toWebpWideBuffer(buf) {
 async function toWebpHeroBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(2400, 1350, {
-      fit: "cover",      // ✅ no padding
-      position: "centre"
-    })
+    .resize(2400, 1350, { fit: "cover", position: "centre" })
     .webp({ quality: 82 })
     .toBuffer();
 }
 
-/* ===================== CLOUDINARY UPLOAD / DELETE / URL ===================== */
+/* ===================== CLOUDINARY URL / UPLOAD / DELETE ===================== */
+
+// ✅ Robust Cloudinary URL builder (works even if API key/secret are missing)
 function cloudUrlFromRef(ref) {
+  ensureCloudinaryUrlReady();
   const id = cloudIdFromRef(ref);
   if (!id) return "";
 
-  // ✅ deliver optimized format/quality
-  // (we already upload WEBP, but this helps modern browsers get AVIF when possible)
-  return cloudinary.url(id, {
-    secure: true,
-    resource_type: "image",
-    transformation: [{ fetch_format: "auto", quality: "auto" }],
-  });
+  // Encode each segment so public_id folders remain valid
+  const encodedPublicId = id.split("/").map(encodeURIComponent).join("/");
+
+  // f_auto,q_auto gives AVIF/WebP when possible + smart compression
+  return `https://res.cloudinary.com/${encodeURIComponent(
+    CLOUDINARY_CLOUD_NAME
+  )}/image/upload/f_auto,q_auto/${encodedPublicId}`;
 }
 
 async function uploadToCloudinary({ buffer, folder, originalName }) {
-  ensureCloudinaryReady();
+  ensureCloudinaryUploadReady();
 
   const base = safeKeyPart(originalName, 60);
   const fullFolder = `${CLOUDINARY_FOLDER}/${folder}`.replace(/\/+/g, "/");
@@ -737,7 +755,7 @@ async function uploadToCloudinary({ buffer, folder, originalName }) {
 
 async function deleteCloudinaryRef(ref) {
   try {
-    ensureCloudinaryReady();
+    ensureCloudinaryUploadReady();
     const id = cloudIdFromRef(ref);
     if (!id) return;
     await cloudinary.uploader.destroy(id, {
@@ -747,20 +765,22 @@ async function deleteCloudinaryRef(ref) {
   } catch {}
 }
 
-/* ===================== SUPABASE UPLOAD (FALLBACK) ===================== */
+/* ===================== SUPABASE UPLOAD (fallback) ===================== */
 async function uploadKeyToSupabase({ buffer, key, contentType = "image/webp" }) {
   ensureSupabaseReady();
-  const { error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, buffer, {
-    contentType,
-    cacheControl: "31536000",
-    upsert: false,
-  });
+  const { error } = await supabaseAdmin.storage
+    .from(SUPABASE_BUCKET)
+    .upload(key, buffer, {
+      contentType,
+      cacheControl: "31536000",
+      upsert: false,
+    });
+
   if (error) throw new Error(error.message || "Supabase upload failed");
   return { key };
 }
 
-/* ===================== “UPLOAD … TO SUPABASE” WRAPPERS (NOW CLOUDINARY-FIRST) ===================== */
-/* ✅ IMPORTANT: we keep your existing function NAMES so you don’t rewrite routes */
+/* ===================== WRAPPERS (keep your existing function NAMES) ===================== */
 
 async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
   const webpBuf = await toWebpSquareBuffer(buffer);
@@ -815,15 +835,15 @@ async function uploadHeroImageToSupabase({ buffer, originalName, heroId }) {
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
 
-/* ===================== URL SIGNER (NOW WORKS FOR BOTH) ===================== */
+/* ===================== URL SIGNER (works for BOTH) ===================== */
 async function signKey(key) {
   const k = String(key || "").trim();
   if (!k) return "";
 
-  // Cloudinary ref
+  // Cloudinary ref (no signing needed)
   if (isCloudRef(k)) return cloudUrlFromRef(k);
 
-  // Supabase signed url (legacy)
+  // Supabase signed url
   ensureSupabaseReady();
   const { data, error } = await supabaseAdmin.storage
     .from(SUPABASE_BUCKET)
@@ -833,19 +853,17 @@ async function signKey(key) {
   return data?.signedUrl || "";
 }
 
-/* ===================== DELETE (NOW WORKS FOR BOTH) ===================== */
+/* ===================== DELETE (works for BOTH) ===================== */
 async function deleteSupabaseKey(key) {
   try {
     const k = String(key || "").trim();
     if (!k) return;
 
-    // Cloudinary ref
     if (isCloudRef(k)) {
       await deleteCloudinaryRef(k);
       return;
     }
 
-    // Supabase key
     ensureSupabaseReady();
     await supabaseAdmin.storage.from(SUPABASE_BUCKET).remove([k]);
   } catch {}
@@ -874,8 +892,17 @@ const uploadProductMedia = upload.fields([
   { name: "images", maxCount: 12 }, // gallery images
 ]);
 
-
-
+/* ===================== EXPORTS (if you use modules) ===================== */
+// module.exports = {
+//   CLOUDINARY_ENABLED,
+//   CLOUDINARY_URL_ENABLED,
+//   uploadProductImageToSupabase,
+//   uploadFeaturedImageToSupabase,
+//   uploadHeroImageToSupabase,
+//   signKey,
+//   deleteSupabaseKey,
+//   uploadProductMedia,
+// };
 /* ===================== ADMIN SESSION (SIGNED COOKIE TOKEN) ===================== */
 function base64url(input) {
   return Buffer.from(input).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
