@@ -11,6 +11,7 @@
     "@supabase/supabase-js": "^2.95.3",
     "axios": "^1.13.4",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.9.0",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

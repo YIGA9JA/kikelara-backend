@@ -49,6 +49,7 @@ const { z, ZodError } = require("zod");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
 const { createClient } = require("@supabase/supabase-js");
+const cloudinary = require("cloudinary").v2;
 
 // Optional security middlewares (only used if installed)
 let rateLimit, slowDown, xssClean, mongoSanitize, hpp;
@@ -587,19 +588,57 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
-/* ===================== SUPABASE STORAGE ===================== */
+/* ===================== MEDIA STORAGE (CLOUDINARY FIRST, SUPABASE FALLBACK) ===================== */
+// ✅ Cloudinary (FAST): public URLs, CDN cached, no signing cost per request
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "";
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || "";
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || "";
+const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "kikelara";
+
+const CLOUDINARY_ENABLED =
+  !!(CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET);
+
+if (CLOUDINARY_ENABLED) {
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+}
+
+function ensureCloudinaryReady() {
+  if (!CLOUDINARY_ENABLED) {
+    throw new Error("Cloudinary not configured (missing CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)");
+  }
+}
+
+function isCloudRef(k) {
+  return String(k || "").startsWith("cld:");
+}
+function cloudIdFromRef(k) {
+  return String(k || "").replace(/^cld:/, "").trim();
+}
+
+/* ---- Supabase (fallback / legacy) ---- */
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
-const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800));
+const SIGNED_URL_TTL_SECONDS = Math.max(
+  60,
+  Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)
+);
 
 const supabaseAdmin =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false },
+      })
     : null;
 
 function ensureSupabaseReady() {
-  if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+  if (!supabaseAdmin)
+    throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
   if (!SUPABASE_BUCKET) throw new Error("SUPABASE_BUCKET missing");
 }
 
@@ -614,17 +653,14 @@ function safeKeyPart(str, max = 40) {
   );
 }
 
+/* ===================== IMAGE ENCODE (WEBP) ===================== */
+/* ✅ No-crop “full image” output (pads with butter background) */
+const BUTTER_BG = { r: 255, g: 239, b: 213, alpha: 1 }; // #ffefd5
+
 async function toWebpSquareBuffer(buf) {
-  return sharp(buf).rotate().resize(1080, 1080, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
-}
-async function toWebpWideBuffer(buf) {
-  return sharp(buf).rotate().resasync function toWebpSquareBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(1080, 1080, {
-      fit: "contain", // ✅ no crop
-      background: { r: 255, g: 239, b: 213, alpha: 1 } // #ffefd5
-    })
+    .resize(1080, 1080, { fit: "contain", background: BUTTER_BG }) // ✅ full image
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -632,15 +668,71 @@ async function toWebpWideBuffer(buf) {
 async function toWebpWideBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(2000, 1125, {
-      fit: "contain", // ✅ no crop
-      background: { r: 255, g: 239, b: 213, alpha: 1 } // #ffefd5
-    })
+    .resize(2000, 1125, { fit: "contain", background: BUTTER_BG }) // ✅ full image
     .webp({ quality: 82 })
     .toBuffer();
-}ize(2000, 1125, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
 }
 
+async function toWebpHeroBuffer(buf) {
+  return sharp(buf)
+    .rotate()
+    .resize(2400, 1350, { fit: "contain", background: BUTTER_BG }) // ✅ full image
+    .webp({ quality: 82 })
+    .toBuffer();
+}
+
+/* ===================== CLOUDINARY UPLOAD / DELETE / URL ===================== */
+function cloudUrlFromRef(ref) {
+  const id = cloudIdFromRef(ref);
+  if (!id) return "";
+
+  // ✅ deliver optimized format/quality
+  // (we already upload WEBP, but this helps modern browsers get AVIF when possible)
+  return cloudinary.url(id, {
+    secure: true,
+    resource_type: "image",
+    transformation: [{ fetch_format: "auto", quality: "auto" }],
+  });
+}
+
+async function uploadToCloudinary({ buffer, folder, originalName }) {
+  ensureCloudinaryReady();
+
+  const base = safeKeyPart(originalName, 60);
+  const fullFolder = `${CLOUDINARY_FOLDER}/${folder}`.replace(/\/+/g, "/");
+
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: fullFolder,
+        resource_type: "image",
+        overwrite: false,
+        unique_filename: true,
+        use_filename: true,
+        filename_override: base,
+        invalidate: true,
+      },
+      (err, result) => {
+        if (err || !result?.public_id) {
+          return reject(err || new Error("Cloudinary upload failed"));
+        }
+        resolve({ key: `cld:${result.public_id}` });
+      }
+    );
+    stream.end(buffer);
+  });
+}
+
+async function deleteCloudinaryRef(ref) {
+  try {
+    ensureCloudinaryReady();
+    const id = cloudIdFromRef(ref);
+    if (!id) return;
+    await cloudinary.uploader.destroy(id, { resource_type: "image", invalidate: true });
+  } catch {}
+}
+
+/* ===================== SUPABASE UPLOAD (FALLBACK) ===================== */
 async function uploadKeyToSupabase({ buffer, key, contentType = "image/webp" }) {
   ensureSupabaseReady();
   const { error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, buffer, {
@@ -652,60 +744,94 @@ async function uploadKeyToSupabase({ buffer, key, contentType = "image/webp" }) 
   return { key };
 }
 
+/* ===================== “UPLOAD … TO SUPABASE” WRAPPERS (NOW CLOUDINARY-FIRST) ===================== */
+/* ✅ IMPORTANT: we keep your existing function NAMES so you don’t rewrite routes */
+
 async function uploadProductImageToSupabase({ buffer, originalName, productId }) {
+  const webpBuf = await toWebpSquareBuffer(buffer);
+
+  // Cloudinary first
+  if (CLOUDINARY_ENABLED) {
+    return uploadToCloudinary({
+      buffer: webpBuf,
+      folder: `products/${productId}`,
+      originalName,
+    });
+  }
+
+  // Supabase fallback
   ensureSupabaseReady();
   const base = safeKeyPart(originalName);
   const key = `products/${productId}/${Date.now()}_${base}.webp`;
-  const webpBuf = await toWebpSquareBuffer(buffer);
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
 
 async function uploadFeaturedImageToSupabase({ buffer, originalName, featuredId }) {
+  const webpBuf = await toWebpWideBuffer(buffer);
+
+  if (CLOUDINARY_ENABLED) {
+    return uploadToCloudinary({
+      buffer: webpBuf,
+      folder: `featured/${featuredId}`,
+      originalName,
+    });
+  }
+
   ensureSupabaseReady();
   const base = safeKeyPart(originalName);
   const key = `featured/${featuredId}/${Date.now()}_${base}.webp`;
-  const webpBuf = await toWebpWideBuffer(buffer);
   return uploadKeyToSupabase({ buffer: webpBuf, key });
-}
-async function toWebpHeroBuffer(buf) {
-  // 16:9 hero (crisp on desktop + mobile)
-  return sharp(buf).rotate().resize(2400, 1350, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
 }
 
 async function uploadHeroImageToSupabase({ buffer, originalName, heroId }) {
+  const webpBuf = await toWebpHeroBuffer(buffer);
+
+  if (CLOUDINARY_ENABLED) {
+    return uploadToCloudinary({
+      buffer: webpBuf,
+      folder: `hero/${heroId}`,
+      originalName,
+    });
+  }
+
   ensureSupabaseReady();
   const base = safeKeyPart(originalName);
   const key = `hero/${heroId}/${Date.now()}_${base}.webp`;
-  const webpBuf = await toWebpHeroBuffer(buffer);
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
 
-async function withSignedHero(row, { includeKeys = false } = {}) {
-  const r = { ...row };
-  const key = String(row?.image_key || "").trim();
-  r.image_url = "";
-  if (key) {
-    try { r.image_url = await signKey(key); } catch { r.image_url = ""; }
-  }
-  if (includeKeys) r.image_key = key;
-  return r;
-}
-
-
+/* ===================== URL SIGNER (NOW WORKS FOR BOTH) ===================== */
 async function signKey(key) {
-  ensureSupabaseReady();
   const k = String(key || "").trim();
   if (!k) return "";
-  const { data, error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
+
+  // Cloudinary ref
+  if (isCloudRef(k)) return cloudUrlFromRef(k);
+
+  // Supabase signed url (legacy)
+  ensureSupabaseReady();
+  const { data, error } = await supabaseAdmin.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
+
   if (error) throw new Error(error.message || "Signing failed");
   return data?.signedUrl || "";
 }
 
+/* ===================== DELETE (NOW WORKS FOR BOTH) ===================== */
 async function deleteSupabaseKey(key) {
   try {
-    ensureSupabaseReady();
     const k = String(key || "").trim();
     if (!k) return;
+
+    // Cloudinary ref
+    if (isCloudRef(k)) {
+      await deleteCloudinaryRef(k);
+      return;
+    }
+
+    // Supabase key
+    ensureSupabaseReady();
     await supabaseAdmin.storage.from(SUPABASE_BUCKET).remove([k]);
   } catch {}
 }
@@ -729,6 +855,7 @@ const uploadProductMedia = upload.fields([
   { name: "image", maxCount: 1 },   // display image
   { name: "images", maxCount: 12 }, // gallery images
 ]);
+
 
 /* ===================== ADMIN SESSION (SIGNED COOKIE TOKEN) ===================== */
 function base64url(input) {
