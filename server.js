@@ -587,19 +587,27 @@ app.get("/db-test", async (req, res) => {
   }
 });
 
-/* ===================== SUPABASE STORAGE ===================== */
+/* ===================== SUPABASE STORAGE (ADMIN) ===================== */
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "kikelara";
-const SIGNED_URL_TTL_SECONDS = Math.max(60, Number(process.env.SIGNED_URL_TTL_SECONDS || 604800));
+const SIGNED_URL_TTL_SECONDS = Math.max(
+  60,
+  Number(process.env.SIGNED_URL_TTL_SECONDS || 604800)
+);
 
 const supabaseAdmin =
   SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false },
+      })
     : null;
 
 function ensureSupabaseReady() {
-  if (!supabaseAdmin) throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+  if (!supabaseAdmin)
+    throw new Error(
+      "Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)"
+    );
   if (!SUPABASE_BUCKET) throw new Error("SUPABASE_BUCKET missing");
 }
 
@@ -614,13 +622,45 @@ function safeKeyPart(str, max = 40) {
   );
 }
 
+/* ===================== IMAGE CONVERT (WEBP) ===================== */
+/* ✅ Full image (no crop): fit: "contain" */
+const BUTTER_BG = { r: 255, g: 239, b: 213, alpha: 1 }; // #ffefd5
+
 async function toWebpSquareBuffer(buf) {
-  return sharp(buf).rotate().resize(1080, 1080, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
-}
-async function toWebpWideBuffer(buf) {
-  return sharp(buf).rotate().resize(2000, 1125, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
+  return sharp(buf)
+    .rotate()
+    .resize(1080, 1080, {
+      fit: "contain",        // ✅ no crop (full image)
+      background: BUTTER_BG, // ✅ fills empty space
+    })
+    .webp({ quality: 82 })
+    .toBuffer();
 }
 
+async function toWebpWideBuffer(buf) {
+  return sharp(buf)
+    .rotate()
+    .resize(2000, 1125, {
+      fit: "contain",        // ✅ no crop (full image)
+      background: BUTTER_BG, // ✅ fills empty space
+    })
+    .webp({ quality: 82 })
+    .toBuffer();
+}
+
+async function toWebpHeroBuffer(buf) {
+  // 16:9 hero (crisp on desktop + mobile) — ✅ FULL IMAGE (no crop)
+  return sharp(buf)
+    .rotate()
+    .resize(2400, 1350, {
+      fit: "contain",        // ✅ no crop (full image)
+      background: BUTTER_BG, // ✅ fills empty space
+    })
+    .webp({ quality: 82 })
+    .toBuffer();
+}
+
+/* ===================== UPLOAD HELPERS ===================== */
 async function uploadKeyToSupabase({ buffer, key, contentType = "image/webp" }) {
   ensureSupabaseReady();
   const { error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).upload(key, buffer, {
@@ -647,10 +687,6 @@ async function uploadFeaturedImageToSupabase({ buffer, originalName, featuredId 
   const webpBuf = await toWebpWideBuffer(buffer);
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
-async function toWebpHeroBuffer(buf) {
-  // 16:9 hero (crisp on desktop + mobile)
-  return sharp(buf).rotate().resize(2400, 1350, { fit: "cover" }).webp({ quality: 82 }).toBuffer();
-}
 
 async function uploadHeroImageToSupabase({ buffer, originalName, heroId }) {
   ensureSupabaseReady();
@@ -660,23 +696,29 @@ async function uploadHeroImageToSupabase({ buffer, originalName, heroId }) {
   return uploadKeyToSupabase({ buffer: webpBuf, key });
 }
 
+/* ===================== SIGN / DELETE ===================== */
 async function withSignedHero(row, { includeKeys = false } = {}) {
   const r = { ...row };
   const key = String(row?.image_key || "").trim();
   r.image_url = "";
   if (key) {
-    try { r.image_url = await signKey(key); } catch { r.image_url = ""; }
+    try {
+      r.image_url = await signKey(key);
+    } catch {
+      r.image_url = "";
+    }
   }
   if (includeKeys) r.image_key = key;
   return r;
 }
 
-
 async function signKey(key) {
   ensureSupabaseReady();
   const k = String(key || "").trim();
   if (!k) return "";
-  const { data, error } = await supabaseAdmin.storage.from(SUPABASE_BUCKET).createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
+  const { data, error } = await supabaseAdmin.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrl(k, SIGNED_URL_TTL_SECONDS);
   if (error) throw new Error(error.message || "Signing failed");
   return data?.signedUrl || "";
 }
@@ -709,6 +751,7 @@ const uploadProductMedia = upload.fields([
   { name: "image", maxCount: 1 },   // display image
   { name: "images", maxCount: 12 }, // gallery images
 ]);
+
 
 /* ===================== ADMIN SESSION (SIGNED COOKIE TOKEN) ===================== */
 function base64url(input) {
