@@ -589,6 +589,7 @@ app.get("/db-test", async (req, res) => {
 });
 
 /* ===================== MEDIA STORAGE (CLOUDINARY FIRST, SUPABASE FALLBACK) ===================== */
+
 // ✅ Cloudinary (FAST): public URLs, CDN cached, no signing cost per request
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "";
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || "";
@@ -609,7 +610,9 @@ if (CLOUDINARY_ENABLED) {
 
 function ensureCloudinaryReady() {
   if (!CLOUDINARY_ENABLED) {
-    throw new Error("Cloudinary not configured (missing CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)");
+    throw new Error(
+      "Cloudinary not configured (missing CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET)"
+    );
   }
 }
 
@@ -638,7 +641,9 @@ const supabaseAdmin =
 
 function ensureSupabaseReady() {
   if (!supabaseAdmin)
-    throw new Error("Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)");
+    throw new Error(
+      "Supabase Storage not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY)"
+    );
   if (!SUPABASE_BUCKET) throw new Error("SUPABASE_BUCKET missing");
 }
 
@@ -654,13 +659,14 @@ function safeKeyPart(str, max = 40) {
 }
 
 /* ===================== IMAGE ENCODE (WEBP) ===================== */
-/* ✅ No-crop “full image” output (pads with butter background) */
-const BUTTER_BG = { r: 255, g: 239, b: 213, alpha: 1 }; // #ffefd5
-
+/* ✅ Full-frame “no outer space” output (fills target size). NOTE: may crop edges. */
 async function toWebpSquareBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(1080, 1080, { fit: "contain", background: BUTTER_BG }) // ✅ full image
+    .resize(1080, 1080, {
+      fit: "cover",      // ✅ no padding
+      position: "centre" // safe default
+    })
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -668,7 +674,10 @@ async function toWebpSquareBuffer(buf) {
 async function toWebpWideBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(2000, 1125, { fit: "contain", background: BUTTER_BG }) // ✅ full image
+    .resize(2000, 1125, {
+      fit: "cover",      // ✅ no padding
+      position: "centre"
+    })
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -676,7 +685,10 @@ async function toWebpWideBuffer(buf) {
 async function toWebpHeroBuffer(buf) {
   return sharp(buf)
     .rotate()
-    .resize(2400, 1350, { fit: "contain", background: BUTTER_BG }) // ✅ full image
+    .resize(2400, 1350, {
+      fit: "cover",      // ✅ no padding
+      position: "centre"
+    })
     .webp({ quality: 82 })
     .toBuffer();
 }
@@ -728,7 +740,10 @@ async function deleteCloudinaryRef(ref) {
     ensureCloudinaryReady();
     const id = cloudIdFromRef(ref);
     if (!id) return;
-    await cloudinary.uploader.destroy(id, { resource_type: "image", invalidate: true });
+    await cloudinary.uploader.destroy(id, {
+      resource_type: "image",
+      invalidate: true,
+    });
   } catch {}
 }
 
@@ -841,7 +856,10 @@ function imageOnly(req, file, cb) {
   const okMime = /^image\//.test(file.mimetype || "");
   const ext = path.extname(file.originalname || "").toLowerCase();
   const okExt = [".png", ".jpg", ".jpeg", ".webp"].includes(ext);
-  cb(okMime && okExt ? null : new Error("Only PNG/JPG/JPEG/WEBP images allowed"), okMime && okExt);
+  cb(
+    okMime && okExt ? null : new Error("Only PNG/JPG/JPEG/WEBP images allowed"),
+    okMime && okExt
+  );
 }
 
 const upload = multer({
@@ -855,6 +873,7 @@ const uploadProductMedia = upload.fields([
   { name: "image", maxCount: 1 },   // display image
   { name: "images", maxCount: 12 }, // gallery images
 ]);
+
 
 
 /* ===================== ADMIN SESSION (SIGNED COOKIE TOKEN) ===================== */
